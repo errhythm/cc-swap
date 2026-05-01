@@ -1930,10 +1930,10 @@ class TestPurge:
         })
 
         with patch("builtins.input", return_value="y"), \
-             patch("claude_swap.switcher.keyring.delete_password") as delete_password:
+             patch("claude_swap.switcher.keyring", create=True) as mock_keyring:
             switcher.purge()
 
-        delete_password.assert_has_calls([
+        mock_keyring.delete_password.assert_has_calls([
             call("claude-code", "account-1-user@example.com"),
             call("claude-code", "account-None-user@example.com"),
         ])
