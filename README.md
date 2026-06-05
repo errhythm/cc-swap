@@ -28,8 +28,9 @@ uv run cswap --help
 ### Updating
 
 ```bash
+cswap --upgrade        # uv/pipx installs on macOS/Linux: auto-detects and upgrades
+# or run your installer directly:
 uv tool upgrade claude-swap
-# or
 pipx upgrade claude-swap
 ```
 
@@ -86,6 +87,7 @@ cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account
 cswap --tui                     # Launch the interactive arrow-key menu
+cswap --upgrade                 # Upgrade claude-swap to the latest version
 cswap --purge                   # Remove all claude-swap data
 ```
 

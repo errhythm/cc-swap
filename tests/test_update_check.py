@@ -201,6 +201,7 @@ class TestCheckForUpdateMessage:
         assert "pipx upgrade" not in result
 
 
+@patch("claude_swap.update_check.sys.platform", "linux")
 class TestRunSelfUpgrade:
     @patch("claude_swap.update_check.subprocess.run")
     @patch("claude_swap.update_check._detect_install_method", return_value="uv")
@@ -249,3 +250,37 @@ class TestRunSelfUpgrade:
         assert run_self_upgrade() == 1
         err = capsys.readouterr().err
         assert "PATH" in err
+
+
+@patch("claude_swap.update_check.sys.platform", "win32")
+class TestRunSelfUpgradeWindows:
+    """On Windows the running .exe is locked, so we never upgrade in place --
+    we print the command for the user to run in a fresh shell and exit 1."""
+
+    @patch("claude_swap.update_check.subprocess.run")
+    @patch("claude_swap.update_check._detect_install_method", return_value="uv")
+    def test_uv_prints_command_and_does_not_run(self, mock_detect, mock_run, capsys):
+        assert run_self_upgrade() == 1
+        mock_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "uv tool upgrade claude-swap" in err
+        assert "Windows" in err
+
+    @patch("claude_swap.update_check.subprocess.run")
+    @patch("claude_swap.update_check._detect_install_method", return_value="pipx")
+    def test_pipx_prints_command_and_does_not_run(self, mock_detect, mock_run, capsys):
+        assert run_self_upgrade() == 1
+        mock_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "pipx upgrade claude-swap" in err
+        assert "Windows" in err
+
+    @patch("claude_swap.update_check.subprocess.run")
+    @patch("claude_swap.update_check._detect_install_method", return_value=None)
+    def test_unknown_method_hits_generic_fallback(self, mock_detect, mock_run, capsys):
+        assert run_self_upgrade() == 1
+        mock_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "uv tool upgrade claude-swap" in err
+        assert "pipx upgrade claude-swap" in err
+        assert "pip install --upgrade claude-swap" in err

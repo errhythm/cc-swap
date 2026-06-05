@@ -105,6 +105,19 @@ def run_self_upgrade() -> int:
             "If you installed with `pip install -e .`, use `git pull` instead."
         )
         return 1
+
+    # Windows: the running cswap.exe launcher is locked, so an in-process
+    # uv/pipx upgrade fails when it tries to replace the executable even
+    # though the package itself updates. Tell the user to run it in a fresh
+    # shell instead of executing it ourselves.
+    if sys.platform == "win32":
+        error(
+            "claude-swap can't upgrade itself while running on Windows.\n"
+            "Close this process, then run in a new terminal:\n"
+            f"  {' '.join(cmd)}"
+        )
+        return 1
+
     try:
         result = subprocess.run(cmd, check=False)
         return result.returncode
