@@ -69,9 +69,9 @@ cswap --switch-to user@example.com
 
 **Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
-### Run an account in one terminal (session mode) `[experimental]`
+### Run multiple accounts at the same time (session mode) `[experimental]`
 
-Run two accounts at the same time: launch Claude Code as a specific account in the current terminal only, while every other terminal and the VS Code extension stay on your default account.
+Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.
 
 ```bash
 cswap run 2                     # launch Claude Code as account 2, here only
