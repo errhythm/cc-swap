@@ -629,17 +629,23 @@ class ClaudeAccountSwitcher:
         organization_uuid = oauth.get("organizationUuid", "") or ""
         return (email, organization_uuid)
 
+    @staticmethod
+    def _find_account_slot(
+        data: dict, email: str, organization_uuid: str
+    ) -> str | None:
+        """Return the slot key for the account matching (email, organizationUuid), else None."""
+        for num, account in data.get("accounts", {}).items():
+            if (account.get("email") == email and
+                    account.get("organizationUuid", "") == organization_uuid):
+                return num
+        return None
+
     def _account_exists(self, email: str, organization_uuid: str) -> bool:
         """Check if account exists by (email, organizationUuid) composite key."""
         data = self._get_sequence_data()
         if not data:
             return False
-
-        for account in data.get("accounts", {}).values():
-            if (account.get("email") == email and
-                    account.get("organizationUuid", "") == organization_uuid):
-                return True
-        return False
+        return self._find_account_slot(data, email, organization_uuid) is not None
 
     @staticmethod
     def _get_display_tag(email: str, org_name: str, org_uuid: str) -> str:
@@ -774,12 +780,7 @@ class ClaudeAccountSwitcher:
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
             seq = self._get_sequence_data()
-            account_num = next(
-                (num for num, acc in seq.get("accounts", {}).items()
-                 if acc.get("email") == current_email and
-                 acc.get("organizationUuid", "") == current_org_uuid),
-                None,
-            )
+            account_num = self._find_account_slot(seq, current_email, current_org_uuid)
             matched_org_name = seq["accounts"][account_num].get("organizationName", "") if account_num else ""
 
             current_creds = self._read_credentials()
@@ -824,11 +825,8 @@ class ClaudeAccountSwitcher:
 
             # Find if current account already exists in a different slot
             if self._account_exists(current_email, current_org_uuid):
-                old_num = next(
-                    (num for num, acc in data.get("accounts", {}).items()
-                     if acc.get("email") == current_email and
-                     acc.get("organizationUuid", "") == current_org_uuid),
-                    None,
+                old_num = self._find_account_slot(
+                    data, current_email, current_org_uuid
                 )
                 if old_num and old_num != account_num:
                     migrate_from = old_num
@@ -973,12 +971,7 @@ class ClaudeAccountSwitcher:
         # If the account already exists (same email, personal), refresh in place.
         if slot is None and self._account_exists(email, ""):
             seq = self._get_sequence_data()
-            account_num = next(
-                (num for num, acc in seq.get("accounts", {}).items()
-                 if acc.get("email") == email
-                 and acc.get("organizationUuid", "") == ""),
-                None,
-            )
+            account_num = self._find_account_slot(seq, email, "")
             if account_num is None:
                 raise ConfigError(
                     f"Existing account metadata for {email} is inconsistent"
@@ -1018,12 +1011,7 @@ class ClaudeAccountSwitcher:
             data = self._get_sequence_data()
 
             if self._account_exists(email, ""):
-                old_num = next(
-                    (num for num, acc in data.get("accounts", {}).items()
-                     if acc.get("email") == email
-                     and acc.get("organizationUuid", "") == ""),
-                    None,
-                )
+                old_num = self._find_account_slot(data, email, "")
                 if old_num and old_num != account_num:
                     migrate_from = old_num
 
@@ -1203,11 +1191,7 @@ class ClaudeAccountSwitcher:
         active_num = None
         if current_identity is not None:
             current_email, current_org_uuid = current_identity
-            for num, account in data.get("accounts", {}).items():
-                if (account.get("email") == current_email and
-                        account.get("organizationUuid", "") == current_org_uuid):
-                    active_num = num
-                    break
+            active_num = self._find_account_slot(data, current_email, current_org_uuid)
 
         accounts_info: list[tuple[int, str, str, str, bool, str]] = []
         for num in data.get("sequence", []):
@@ -1288,16 +1272,22 @@ class ClaudeAccountSwitcher:
         """Decide the ``best`` strategy target relative to the current account.
 
         Compares the rate-limit headroom of every *other* switchable account
-        against the current one and only recommends a switch that lands on
-        *strictly more* headroom — never onto an account worse than where the
-        user already is. Returns ``(target, note)``:
+        against the current one and only recommends a switch it can *prove*
+        lands on strictly more headroom — never onto an account worse than (or
+        merely unverifiable against) where the user already is. When a switch
+        can't be proven beneficial, it stays put; bare ``cswap --switch``
+        remains the way to force a plain rotation. Returns ``(target, note)``:
 
         - ``(num, "")`` — switch to ``num`` (strictly more headroom than current)
-        - ``(None, "stay")`` — current account already has the most headroom
-        - ``(None, "exhausted")`` — current is the best but everything is at its
-          limit (switching would not help)
-        - ``(None, "unavailable")`` — no other account has usage data; caller
-          falls back to plain rotation
+        - ``(None, "current-unavailable")`` — current account's usage is unknown,
+          so no comparison is possible → stay
+        - ``(None, "no-comparison")`` — no other account has known usage → stay
+        - ``(None, "incomplete-comparison")`` — current is best among the
+          accounts we can measure, but some candidate's usage is unknown, so we
+          can't claim it's the best or that everything is exhausted → stay
+        - ``(None, "stay")`` — current account provably has the most headroom
+        - ``(None, "exhausted")`` — current is the best and every account is at
+          its limit (switching would not help) → stay
         - ``(None, "none")`` — no other switchable account exists
 
         Ties (including current-vs-other) resolve in favour of staying put.
@@ -1312,29 +1302,30 @@ class ClaudeAccountSwitcher:
             return None, "none"
 
         usage = self._usage_by_account()
-        scored = [
-            (h, num)
-            for num in others
-            if (h := oauth.account_headroom(usage.get(num))) is not None
-        ]
-        if not scored:
-            return None, "unavailable"
-
-        # max() keeps the first maximal element; `scored` preserves rotation
-        # order, so ties resolve to the earliest slot.
-        best_headroom, best_num = max(scored, key=lambda t: t[0])
         current_headroom = oauth.account_headroom(usage.get(str(current_num)))
-
         if current_headroom is None:
-            # Can't compare to the current account — switch only if the best
-            # other account still has room; otherwise everything is exhausted.
-            return (best_num, "") if best_headroom > 0 else (None, "exhausted")
+            # Can't measure where the user is → can't prove any target is
+            # better. Stay rather than risk moving onto a worse account.
+            return None, "current-unavailable"
 
+        scored = [(oauth.account_headroom(usage.get(num)), num) for num in others]
+        known = [(h, num) for h, num in scored if h is not None]
+        if not known:
+            return None, "no-comparison"
+
+        # max() keeps the first maximal element; `known` preserves rotation
+        # order, so ties resolve to the earliest slot.
+        best_headroom, best_num = max(known, key=lambda t: t[0])
         if best_headroom > current_headroom:
             return best_num, ""
-        # Current account is the best (or tied). Stay; distinguish the all-maxed
-        # case so the caller can word it accurately.
-        return None, ("exhausted" if current_headroom <= 0 else "stay")
+
+        # Current is at least as good as every account we can measure. Stay —
+        # but only claim "all exhausted" when every candidate's usage is known.
+        if any(h is None for h, _ in scored):
+            return None, "incomplete-comparison"
+        if current_headroom <= 0:
+            return None, "exhausted"
+        return None, "stay"
 
     def list_accounts(
         self,
@@ -1420,14 +1411,10 @@ class ClaudeAccountSwitcher:
             print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
             return
 
-        account_num = None
+        account_num = self._find_account_slot(data, current_email, current_org_uuid)
         org_name = ""
-        for num, info in data.get("accounts", {}).items():
-            if (info.get("email") == current_email and
-                    info.get("organizationUuid", "") == current_org_uuid):
-                account_num = num
-                org_name = info.get("organizationName", "") or ""
-                break
+        if account_num is not None:
+            org_name = data["accounts"][account_num].get("organizationName", "") or ""
 
         if account_num:
             tag = self._get_display_tag(current_email, org_name, current_org_uuid)
@@ -1493,11 +1480,13 @@ class ClaudeAccountSwitcher:
                   next account, skipping any currently at its 5h/7d limit. ``None``
                   (the default) performs a plain rotation.
 
-        The usage-aware strategies never block: if usage data can't be fetched,
-        or every candidate is exhausted, the switch falls back to plain rotation.
-        They apply to the normal path (a live Claude login present); the
-        fresh-machine path (no live login, e.g. right after --import) ignores
-        them.
+        ``"best"`` only switches when it can prove another account has more
+        remaining quota; if usage can't be fetched or no candidate is provably
+        better, it stays put (run a plain ``cswap --switch`` to rotate anyway).
+        ``"next-available"`` rotates and skips accounts at their limit, falling
+        back to plain rotation when usage is unavailable. Both apply only to the
+        normal path (a live Claude login present); the fresh-machine path (no
+        live login, e.g. right after --import) ignores them.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -1565,20 +1554,35 @@ class ClaudeAccountSwitcher:
         # Where the user actually is right now (live identity), falling back to
         # the recorded active slot. Used so usage-aware switching never moves
         # them onto an account worse than their current one.
-        current_num = next(
-            (num for num, acc in data.get("accounts", {}).items()
-             if acc.get("email") == current_email
-             and acc.get("organizationUuid", "") == current_org_uuid),
-            str(active_account) if active_account is not None else None,
-        )
+        current_num = self._find_account_slot(data, current_email, current_org_uuid)
+        if current_num is None:
+            current_num = str(active_account) if active_account is not None else None
 
-        # Usage-aware "jump to most headroom". Only switches to strictly more
-        # headroom than the current account; otherwise stays put or (when usage
-        # is unavailable) falls through to plain rotation.
+        # Usage-aware "jump to most headroom". Only switches when another
+        # account is provably better; otherwise stays put (never moves onto a
+        # worse or unverifiable account). Bare `cswap --switch` rotates anyway.
         if strategy == "best":
             target, note = self._select_best_switchable(current_num)
             if target is not None:
                 self._perform_switch(target)
+                return
+            if note == "current-unavailable":
+                print(dimmed(
+                    f"Current account usage is unavailable — staying on "
+                    f"Account-{current_num}. Run cswap --switch to rotate."
+                ))
+                return
+            if note == "no-comparison":
+                print(dimmed(
+                    f"No other account has usage data to compare — staying on "
+                    f"Account-{current_num}. Run cswap --switch to rotate."
+                ))
+                return
+            if note == "incomplete-comparison":
+                print(dimmed(
+                    f"No account with known usage has more remaining quota; some "
+                    f"usage is unavailable — staying on Account-{current_num}."
+                ))
                 return
             if note == "stay":
                 print(
@@ -1592,18 +1596,25 @@ class ClaudeAccountSwitcher:
                     f"Account-{current_num}."
                 )
                 return
-            if note == "unavailable":
-                print(dimmed("Usage data unavailable — rotating to the next account."))
             # note == "none": fall through; rotation reports the lack of targets.
 
         # Find current index and get next, skipping broken candidates.
         # The active slot is never checked here — _perform_switch captures
         # live state into a fresh backup before swapping, so the active
         # slot's stored backup may be stale or absent without blocking us.
+        #
+        # Usage-aware rotation anchors on the live account (current_num) so it
+        # never lands a no-op on the slot you're already on when the live login
+        # has drifted from the recorded activeAccountNumber. Plain rotation keeps
+        # anchoring on active_account for byte-for-byte unchanged behavior.
+        anchor = current_num if strategy == "next-available" else active_account
         try:
-            current_index = sequence.index(active_account)
-        except ValueError:
-            current_index = 0
+            current_index = sequence.index(int(anchor))
+        except (TypeError, ValueError):
+            try:
+                current_index = sequence.index(active_account)
+            except (TypeError, ValueError):
+                current_index = 0
 
         # Only fetch usage when needed; an empty map means the headroom check
         # below is always None (skipped), preserving the non-usage-aware path.
@@ -1728,13 +1739,8 @@ class ClaudeAccountSwitcher:
             current_identity = self._get_current_account()
             if current_identity is not None:
                 current_email, current_org_uuid = current_identity
-                current_account = next(
-                    (
-                        num for num, account in data.get("accounts", {}).items()
-                        if account.get("email") == current_email
-                        and account.get("organizationUuid", "") == current_org_uuid
-                    ),
-                    None,
+                current_account = self._find_account_slot(
+                    data, current_email, current_org_uuid
                 )
 
             config_path = self._get_claude_config_path()

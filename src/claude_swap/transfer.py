@@ -42,19 +42,6 @@ def _eprint(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _find_account_slot(
-    sequence_data: dict, email: str, organization_uuid: str
-) -> str | None:
-    """Return slot key for matching (email, organizationUuid), else None."""
-    for num, account in sequence_data.get("accounts", {}).items():
-        if (
-            account.get("email") == email
-            and account.get("organizationUuid", "") == organization_uuid
-        ):
-            return num
-    return None
-
-
 def _parse_payload(text: str, label: str) -> dict:
     """Parse a JSON string that should decode to an object."""
     try:
@@ -374,7 +361,9 @@ def import_accounts(
             "sequence": [],
             "accounts": {},
         }
-        existing_slot = _find_account_slot(data, entry["email"], entry["org_uuid"])
+        existing_slot = switcher._find_account_slot(
+            data, entry["email"], entry["org_uuid"]
+        )
 
         if existing_slot is not None:
             if not force:
