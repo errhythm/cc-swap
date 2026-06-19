@@ -924,6 +924,10 @@ class TestPerformSwitchPostDisplay:
             switcher, creds_store, configs_store, live_state,
         )
 
+        # Pin platform so the post-switch followup message is deterministic
+        # across hosts (macOS prints a different note).
+        switcher.platform = Platform.LINUX
+
         try:
             with patch.object(
                 switcher,
@@ -944,7 +948,31 @@ class TestPerformSwitchPostDisplay:
         output = capsys.readouterr().out
         assert "Switched to" in output
         assert "usage display unavailable" in output
-        assert "restart Claude Code" in output
+        assert "no restart needed" in output
+
+    def test_switch_followup_macos(self, temp_home: Path, capsys):
+        """macOS shows the ~30s cache note; a restart applies it instantly."""
+        switcher = ClaudeAccountSwitcher()
+        switcher.platform = Platform.MACOS
+
+        switcher._print_switch_followup()
+
+        out = capsys.readouterr().out
+        assert "within about 30 seconds" in out
+        assert "apply immediately" in out
+        assert "no restart needed" not in out
+
+    def test_switch_followup_non_macos(self, temp_home: Path, capsys):
+        """Linux/WSL/Windows show the immediate, no-restart note."""
+        for plat in (Platform.LINUX, Platform.WSL, Platform.WINDOWS):
+            switcher = ClaudeAccountSwitcher()
+            switcher.platform = plat
+
+            switcher._print_switch_followup()
+
+            out = capsys.readouterr().out
+            assert "no restart needed" in out, plat
+            assert "30 seconds" not in out, plat
 
     def test_switch_with_unset_active_account_does_not_write_none_backup(
         self,

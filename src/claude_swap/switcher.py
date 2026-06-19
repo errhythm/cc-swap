@@ -1846,7 +1846,7 @@ class ClaudeAccountSwitcher:
                     f"{accent('Activated')} Account-{target_account} ({target_email})"
                 )
                 print()
-                warning("Please restart Claude Code to use the new authentication.")
+                self._print_switch_followup()
                 print()
                 return
 
@@ -1953,8 +1953,25 @@ class ClaudeAccountSwitcher:
             self._logger.warning(f"Post-switch usage display failed: {e!r}")
             print(dimmed("  (usage display unavailable — run `cswap --list` to retry)"))
         print()
-        warning("Please restart Claude Code to use the new authentication.")
+        self._print_switch_followup()
         print()
+
+    def _print_switch_followup(self) -> None:
+        """Print the platform-appropriate note after a successful switch.
+
+        A restart is never required: Claude Code clears its cached OAuth token
+        when ``.credentials.json`` changes (Linux/WSL/Windows — effective on the
+        next message) or when the macOS Keychain cache TTL (~30s) expires. Both
+        lines are therefore dim informational hints, not warnings; macOS adds
+        that a restart skips the ~30s wait.
+        """
+        if self.platform == Platform.MACOS:
+            print(dimmed(
+                "Switch takes effect within about 30 seconds — "
+                "restart Claude Code to apply immediately."
+            ))
+        else:
+            print(dimmed("Active on your next message — no restart needed."))
 
     def purge(self) -> None:
         """Remove all traces of claude-swap from the system.
