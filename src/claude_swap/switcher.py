@@ -1088,8 +1088,12 @@ class ClaudeAccountSwitcher:
             f"{muted('[personal]')} {muted(f'(from {source_label})')}"
         )
 
-    def remove_account(self, identifier: str) -> None:
-        """Remove account from managed accounts."""
+    def remove_account(self, identifier: str, assume_yes: bool = False) -> None:
+        """Remove account from managed accounts.
+
+        When ``assume_yes`` is True the confirmation prompt is skipped (used by
+        the TUI, which collects confirmation before calling).
+        """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
 
@@ -1145,13 +1149,14 @@ class ClaudeAccountSwitcher:
         if str(active_account) == account_num:
             warning(f"Warning: Account-{account_num} ({email}) is currently active")
 
-        confirm = input(
-            f"Are you sure you want to permanently remove "
-            f"Account-{account_num} ({email})? [y/N] "
-        )
-        if confirm.lower() != "y":
-            print(dimmed("Cancelled"))
-            return
+        if not assume_yes:
+            confirm = input(
+                f"Are you sure you want to permanently remove "
+                f"Account-{account_num} ({email})? [y/N] "
+            )
+            if confirm.lower() != "y":
+                print(dimmed("Cancelled"))
+                return
 
         # Remove backup files
         self._delete_account_files(account_num, email)

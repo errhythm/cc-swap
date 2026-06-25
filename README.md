@@ -107,6 +107,8 @@ cswap --upgrade                 # Upgrade claude-swap to the latest version
 cswap --purge                   # Remove all claude-swap data
 ```
 
+In the interactive TUI, read-only and switch/remove actions now render in a scrollable panel **inside** the menu (no more scrolling stdout). The **Watch** item opens a live dashboard of the active account and per-account usage that auto-refreshes on a configurable interval (`+`/`-` to change it, `r` to refresh now, `q` to exit). Usage itself is cached for 15s, so very short intervals re-render cached numbers rather than re-fetching.
+
 ## Tips
 
 - **Do you need to restart after switching?** Usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message — no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
