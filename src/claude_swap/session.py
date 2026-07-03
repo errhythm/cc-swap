@@ -189,6 +189,21 @@ def live_sessions_for(session_dir: Path) -> list[ClaudeSession]:
     return list_sessions(claude_dir=session_dir)
 
 
+def _mkdir_private(path: Path) -> None:
+    """mkdir -p with 0o700 on every created level.
+
+    ``Path.mkdir(parents=True, mode=...)`` applies the mode only to the leaf;
+    history dirs must match Claude Code's own 0o700 at every level.
+    """
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=True)
+
+
 def _probe_env(session_dir: Path) -> dict[str, str]:
     """Env for the auth-status probe: session config dir, auth overrides dropped."""
     env = {k: v for k, v in os.environ.items() if k not in AUTH_OVERRIDE_ENV_VARS}
@@ -525,9 +540,15 @@ class SessionManager:
 
         # A flag turned off since last launch: remove the links we created
         # for it (never plain files/dirs the user accumulated themselves).
+        # For history items that holds even when the manifest claims them:
+        # a stale manifest (lock-free launches race) must never be able to
+        # delete real conversation history — only ever unlink symlinks.
         for name in managed:
             if name not in active_items:
-                self._remove_managed(session_dir / name)
+                dest = session_dir / name
+                if name in HISTORY_ITEMS and dest.exists() and not dest.is_symlink():
+                    continue
+                self._remove_managed(dest)
         if not active_items:
             manifest_path.unlink(missing_ok=True)
             return
@@ -540,7 +561,7 @@ class SessionManager:
             dest = session_dir / name
 
             if name in HISTORY_ITEMS and not self._prepare_history_share(
-                src, dest, name in managed, session_dir
+                src, dest, session_dir
             ):
                 continue
 
@@ -597,7 +618,7 @@ class SessionManager:
         self._write_manifest(manifest_path, new_managed)
 
     def _prepare_history_share(
-        self, src: Path, dest: Path, dest_managed: bool, session_dir: Path
+        self, src: Path, dest: Path, session_dir: Path
     ) -> bool:
         """Make a history item linkable; returns False to skip it this launch.
 
@@ -605,9 +626,11 @@ class SessionManager:
         the profile may already hold real history that must survive (merged
         into ``~/.claude``, never discarded — the generic loop would just
         refuse), and the share source may not exist yet on a fresh install
-        (created empty so there is something to link).
+        (created empty so there is something to link). Real history is merged
+        even when the manifest claims the entry is managed: a stale manifest
+        (lock-free launches race) must never let the generic loop delete it.
         """
-        if dest.exists() and not dest.is_symlink() and not dest_managed:
+        if dest.exists() and not dest.is_symlink():
             # Real per-account history accumulated before the flag existed.
             # Merging moves files out from under any claude still running in
             # this profile, so only migrate when the profile is quiescent.
@@ -642,11 +665,14 @@ class SessionManager:
             # Fresh ~/.claude (or first run): seed an empty share target so
             # the generic loop below has something to link.
             try:
+                # 0o600/0o700 to match Claude Code's own modes for history
+                # data — its mode= applies only at creation, so a loose seed
+                # here would stay world-readable forever.
                 if dest.name.endswith(".jsonl"):
                     src.parent.mkdir(parents=True, exist_ok=True)
-                    src.touch()
+                    src.touch(mode=0o600)
                 else:
-                    src.mkdir(parents=True, exist_ok=True)
+                    _mkdir_private(src)
             except OSError as e:
                 self._logger.warning(f"Could not create {src}: {e}")
                 return False
@@ -663,7 +689,7 @@ class SessionManager:
         raises OSError and leaves remaining files in place for the next try.
         """
         if dest.is_dir():
-            src.mkdir(parents=True, exist_ok=True)
+            _mkdir_private(src)
             for path in sorted(dest.rglob("*"), reverse=True):
                 rel = path.relative_to(dest)
                 target = src / rel
@@ -673,7 +699,7 @@ class SessionManager:
                 if target.exists():
                     path.unlink()
                     continue
-                target.parent.mkdir(parents=True, exist_ok=True)
+                _mkdir_private(target.parent)
                 shutil.move(str(path), str(target))
             dest.rmdir()
         else:
@@ -687,6 +713,8 @@ class SessionManager:
             ]
             if lines:
                 src.parent.mkdir(parents=True, exist_ok=True)
+                if not src.exists():
+                    src.touch(mode=0o600)  # match Claude Code's history mode
                 with src.open("a", encoding="utf-8") as f:
                     f.write("\n".join(lines) + "\n")
             dest.unlink()

@@ -17,7 +17,6 @@ from claude_swap.exceptions import AccountNotFoundError, SessionError
 from claude_swap.models import Platform
 from claude_swap.session import (
     SHARE_MANIFEST,
-    SHARED_ITEMS,
     SessionManager,
     _probe_env,
     keychain_service_name,
@@ -1085,6 +1084,64 @@ class TestShareHistoryPosix:
 
         assert (session_dir / "projects").is_symlink()
         assert not (session_dir / "settings.json").exists()
+
+    def test_seeded_source_has_claude_code_modes(self, share_setup):
+        source, session_dir, mgr = share_setup  # no history in ~/.claude yet
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert (source / "projects").stat().st_mode & 0o777 == 0o700
+        assert (source / "history.jsonl").stat().st_mode & 0o777 == 0o600
+
+    def test_merge_creates_dirs_and_files_with_claude_code_modes(self, share_setup):
+        source, session_dir, mgr = share_setup  # no history in ~/.claude yet
+        deep = session_dir / "projects" / "-home-user-app" / "sess1"
+        deep.mkdir(parents=True)
+        (deep / "agent.jsonl").write_text("profile\n")
+        (session_dir / "history.jsonl").write_text('{"p": "profile"}\n')
+
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        for created in (
+            source / "projects",
+            source / "projects" / "-home-user-app",
+            source / "projects" / "-home-user-app" / "sess1",
+        ):
+            assert created.stat().st_mode & 0o777 == 0o700
+        assert (source / "history.jsonl").stat().st_mode & 0o777 == 0o600
+
+    def test_stale_manifest_never_deletes_real_history(self, history_setup):
+        # Lock-free launches can race: the manifest claims history items are
+        # managed while the profile holds a real dir. Must merge, not rmtree.
+        source, session_dir, mgr = history_setup
+        proj = session_dir / "projects" / "-home-user-app"
+        proj.mkdir(parents=True)
+        (proj / "bbb.jsonl").write_text("profile-b\n")
+        (session_dir / "history.jsonl").write_text('{"p": "profile"}\n')
+        (session_dir / SHARE_MANIFEST).write_text(
+            json.dumps({"items": ["projects", "history.jsonl"], "mode": "symlink"})
+        )
+
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert (
+            source / "projects" / "-home-user-app" / "bbb.jsonl"
+        ).read_text() == "profile-b\n"
+        assert '{"p": "profile"}' in (source / "history.jsonl").read_text()
+        assert (session_dir / "projects").readlink() == source / "projects"
+
+    def test_toggle_off_with_stale_manifest_keeps_real_history(self, history_setup):
+        source, session_dir, mgr = history_setup
+        proj = session_dir / "projects" / "-home-user-app"
+        proj.mkdir(parents=True)
+        (proj / "bbb.jsonl").write_text("profile-b\n")
+        (session_dir / SHARE_MANIFEST).write_text(
+            json.dumps({"items": ["projects"], "mode": "symlink"})
+        )
+
+        mgr._sync_sharing(session_dir, share=True, share_history=False)
+
+        # Real history is user data even when the manifest claims it.
+        assert (proj / "bbb.jsonl").read_text() == "profile-b\n"
 
 
 class TestShareHistoryWindows:
