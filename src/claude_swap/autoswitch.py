@@ -329,18 +329,37 @@ def _limiting_reset_ts(usage: dict | None) -> float | None:
         pct = window.get("pct")
         if not isinstance(pct, (int, float)) or pct < 100.0:
             continue
-        resets_at = window.get("resets_at")
-        if not resets_at:
-            continue
-        try:
-            ts = datetime.fromisoformat(
-                str(resets_at).replace("Z", "+00:00")
-            ).timestamp()
-        except ValueError:
-            continue
-        if latest is None or ts > latest:
+        ts = _window_reset_ts(window)
+        if ts is not None and (latest is None or ts > latest):
             latest = ts
     return latest
+
+
+def _earliest_future_reset_ts(usage: dict | None, now: float) -> float | None:
+    """Epoch of the next window reset still ahead of ``now``, any utilization."""
+    if not isinstance(usage, dict):
+        return None
+    earliest: float | None = None
+    for key in ("five_hour", "seven_day"):
+        window = usage.get(key)
+        if not isinstance(window, dict):
+            continue
+        ts = _window_reset_ts(window)
+        if ts is not None and ts > now and (earliest is None or ts < earliest):
+            earliest = ts
+    return earliest
+
+
+def _window_reset_ts(window: dict) -> float | None:
+    resets_at = window.get("resets_at")
+    if not resets_at:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(resets_at).replace("Z", "+00:00")
+        ).timestamp()
+    except ValueError:
+        return None
 
 
 def _ref(number: str, email: str) -> dict:
@@ -863,9 +882,12 @@ class AutoSwitchEngine:
         Movement (binding pct changed ≥ ``MOVEMENT_DELTA_PCT`` since its
         previous poll — someone is using it elsewhere) halves the interval,
         floored at the engine interval; no movement backs it off ×1.5 up to
-        ``CANDIDATE_MAX_INTERVAL_S``. A candidate at its limit skips straight
-        to its window reset (``nextPollAt`` only — the learned interval is
-        kept for when it comes back).
+        ``CANDIDATE_MAX_INTERVAL_S``. A poll is never scheduled later than the
+        candidate's next window reset (stored usage is obsolete the moment a
+        window rolls over — a 95% candidate is really ~0% after its reset).
+        A candidate at its limit skips straight to its window reset
+        (``nextPollAt`` only — the learned interval is kept for when it
+        comes back).
         """
         plans: dict[str, tuple[float | None, float | None]] = {}
         for num in candidates:
@@ -889,6 +911,10 @@ class AutoSwitchEngine:
                 reset_ts = _limiting_reset_ts(after.last_good)
                 if reset_ts is not None and reset_ts > next_poll:
                     next_poll = reset_ts
+            else:
+                reset_ts = _earliest_future_reset_ts(after.last_good, now)
+                if reset_ts is not None:
+                    next_poll = min(next_poll, reset_ts + RESET_SLACK_S)
             plans[num] = (next_poll, interval)
         if plans:
             self.switcher.set_usage_poll_plan(plans)

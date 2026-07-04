@@ -154,17 +154,19 @@ class TestListJson:
         assert by_num[2]["usageStatus"] == "no_credentials"
 
     @pytest.mark.parametrize(
-        "age_s,expected_status", [(100.0, "ok"), (400.0, "unavailable")]
+        "age_s,expected_status", [(100.0, "ok"), (400.0, "ok"), (4000.0, "unavailable")]
     )
     def test_stale_usage_is_decision_gated_in_json(
         self, temp_home: Path, mock_claude_config: Path,
         sample_sequence_data: dict, age_s: float, expected_status: str,
     ):
-        """JSON serves last-good only while decision-grade (≤ STALE_OK_S).
+        """JSON serves last-good only while decision-grade.
 
-        A script keying on usageStatus == "ok" must never act on arbitrarily
-        old data; past the trust window the row reports unavailable even
-        though the human view still shows the last-seen numbers with age.
+        With the refetch failing, staleness past STALE_OK_S is deliberate
+        (stale-on-error) and stays decision-grade — but a script keying on
+        usageStatus == "ok" must never act on arbitrarily old data: past
+        TRUST_MAX_AGE_S the row reports unavailable even though the human
+        view still shows the last-seen numbers with age.
         """
         import time as time_mod
 

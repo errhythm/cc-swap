@@ -13,6 +13,7 @@ from claude_swap.usage_store import (
     CLAIM_TTL_S,
     SERVE_TTL_S,
     STALE_OK_S,
+    TRUST_MAX_AGE_S,
     FetchRecord,
     UsageEntry,
     UsageStore,
@@ -115,6 +116,54 @@ class TestStaleOnError:
         assert entry.last_error is None
         assert entry.fetched_at is not None
         assert entry.decision_value() is None
+
+
+class TestExtendedTrust:
+    """Deliberate staleness (failure state, scheduler cadence) stays trusted."""
+
+    def test_in_backoff_past_stale_ok_is_still_trusted(self, store, clock):
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)
+        clock.advance(STALE_OK_S)
+        store.record(
+            {"1": FetchRecord(error="http-429", retry_after_s=480.0)}, IDENT
+        )
+        clock.advance(60)
+        entry = store.entries(IDENT)["1"]
+        assert entry.age_s > STALE_OK_S
+        assert entry.in_backoff(clock.now)
+        assert entry.trust_extended
+        assert entry.decision_value() == USAGE
+
+    def test_failure_state_after_backoff_expiry_is_still_trusted(self, store, clock):
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)
+        clock.advance(60)
+        store.record({"1": FetchRecord(error="timeout")}, IDENT)
+        clock.advance(BACKOFF_BASE_S + STALE_OK_S)  # backoff long expired
+        entry = store.entries(IDENT)["1"]
+        assert not entry.in_backoff(clock.now)
+        assert entry.decision_value() == USAGE
+
+    def test_within_poll_plan_past_stale_ok_is_trusted(self, store, clock):
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)
+        store.set_poll_plan({"1": (clock.now + 600.0, 600.0)}, IDENT)
+        clock.advance(400)
+        entry = store.entries(IDENT)["1"]
+        assert entry.consecutive_failures == 0
+        assert entry.decision_value() == USAGE
+        # Once overdue, the staleness is no longer scheduler-chosen.
+        clock.advance(250)
+        assert store.entries(IDENT)["1"].decision_value() is None
+
+    def test_trust_ceiling_wins_over_failure_state(self, store, clock):
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)
+        store.record({"1": FetchRecord(error="http-429")}, IDENT)
+        clock.advance(TRUST_MAX_AGE_S + 1)
+        store.record({"1": FetchRecord(error="http-429")}, IDENT)
+        entry = store.entries(IDENT)["1"]
+        assert entry.consecutive_failures == 2
+        assert entry.decision_value() is None
+        # Display still sees the measurement + its age.
+        assert entry.last_good == USAGE
 
 
 class TestBackoff:

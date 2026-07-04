@@ -23,7 +23,7 @@ from claude_swap.autoswitch import (
     UnquarantineEvent,
 )
 from claude_swap.json_output import USAGE_TOKEN_EXPIRED
-from claude_swap.usage_store import UsageEntry
+from claude_swap.usage_store import FetchRecord, UsageEntry
 from claude_swap.models import Platform
 from claude_swap.settings import AutoSwitchSettings
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -126,6 +126,9 @@ class EngineHarness:
         entries = {
             num: _entry_for(value, self.clock.now) for num, value in usage.items()
         }
+        return self.tick_with_entries(entries)
+
+    def tick_with_entries(self, entries: dict[str, UsageEntry]) -> TickOutcome:
         with patch.object(
             self.switcher, "usage_entries_by_account", return_value=entries
         ):
@@ -214,6 +217,45 @@ class TestDecisionTable:
         assert harness.engine._sleep_until_ts is None
         delay = harness.engine._next_delay(outcome)
         assert delay <= 1.1 * harness.settings.interval_seconds
+
+    def test_stale_beyond_trust_blocks_all_exhausted(self, harness):
+        # One candidate exhausted on trusted-stale data, the other's data aged
+        # past every trust window (no failures, no plan — just overdue): the
+        # unknown candidate could be viable, so no long reset-sleep.
+        now = harness.clock.now
+        reset = "2026-07-05T12:00:00Z"
+        outcome = harness.tick_with_entries({
+            "1": UsageEntry(last_good=_usage(95), fetched_at=now, age_s=0.0),
+            "2": UsageEntry(
+                last_good=_usage(100, reset), fetched_at=now - 400, age_s=400.0,
+                consecutive_failures=1, trust_extended=True,
+            ),
+            "3": UsageEntry(last_good=_usage(10), fetched_at=now - 400, age_s=400.0),
+        })
+        assert outcome is TickOutcome.BLOCKED
+        assert not any(isinstance(e, AllExhaustedEvent) for e in harness.events)
+        reasons = [e.reason for e in harness.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["no-qualifying-candidate"]
+
+    def test_trusted_stale_exhausted_set_still_fires_all_exhausted(self, harness):
+        # Every candidate at its limit, known only through trusted-stale data
+        # (in failure state) — that is still "known and exhausted".
+        now = harness.clock.now
+        reset = "2026-07-05T12:00:00Z"
+        stale_exhausted = UsageEntry(
+            last_good=_usage(100, reset), fetched_at=now - 400, age_s=400.0,
+            consecutive_failures=1, trust_extended=True,
+        )
+        outcome = harness.tick_with_entries({
+            "1": UsageEntry(last_good=_usage(95), fetched_at=now, age_s=0.0),
+            "2": stale_exhausted,
+            "3": stale_exhausted,
+        })
+        assert outcome is TickOutcome.BLOCKED
+        exhausted = next(
+            e for e in harness.events if isinstance(e, AllExhaustedEvent)
+        )
+        assert exhausted.earliest_reset_at == reset
 
     def test_cooldown_suppresses_proactive(self, harness):
         harness.engine._mutate_state(
@@ -467,6 +509,29 @@ class TestAdaptiveScheduler:
         assert outcome is TickOutcome.SWITCHED
         assert h.active_number() == 2
 
+    def test_active_in_backoff_keeps_trusted_headroom(self, temp_home, monkeypatch):
+        # The active account's fetches are being refused (429 with a long
+        # Retry-After). Its last-good data ages past STALE_OK_S, but the
+        # staleness is deliberate: headroom stays known, so no unhealthy
+        # ticks and no escalate-all burst while the server is rate limiting.
+        h = self._harness(temp_home, monkeypatch)
+        usage = {"1": _usage(50), "2": _usage(10), "3": _usage(20)}
+        counts: dict[str, int] = {}
+        self._tick(h, counts, usage)
+        h.clock.advance(60)
+        self._tick(h, counts, usage)
+        h.switcher._usage_store.record(
+            {"1": FetchRecord(error="http-429", retry_after_s=600.0)},
+            {"1": ("a@example.com", "")},
+        )
+        h.clock.advance(400)  # active data now well past STALE_OK_S, in backoff
+        counts.clear()
+        outcome = self._tick(h, counts, usage)
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.engine._unhealthy_ticks == 0
+        assert "1" not in counts  # backoff respected
+        assert sum(counts.values()) == 1  # baseline slot only, no escalate-all
+
     def test_exhausted_candidate_skips_to_its_reset(self, temp_home, monkeypatch):
         from datetime import datetime, timezone
 
@@ -483,6 +548,30 @@ class TestAdaptiveScheduler:
             {"2": ("b@example.com", "")}
         )["2"]
         assert entry.next_poll_at == pytest.approx(reset_ts)
+
+    def test_poll_never_scheduled_past_a_window_reset(self, temp_home, monkeypatch):
+        from datetime import datetime, timezone
+
+        from claude_swap.autoswitch import RESET_SLACK_S
+
+        # Engine interval 600s, but the candidate's 5h window resets in 90s —
+        # its stored 40% is obsolete at the rollover, so the next poll must be
+        # clamped to reset + slack rather than waiting the full interval.
+        h = self._harness(temp_home, monkeypatch, accounts=2, interval_seconds=600)
+        reset_ts = h.clock.now + 90.0
+        reset_iso = (
+            datetime.fromtimestamp(reset_ts, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        usage = {"1": _usage(50), "2": _usage(40, reset_iso)}
+        counts: dict[str, int] = {}
+        self._tick(h, counts, usage)
+        entry = h.switcher._usage_store.entries(
+            {"2": ("b@example.com", "")}
+        )["2"]
+        assert entry.next_poll_at == pytest.approx(reset_ts + RESET_SLACK_S)
+        assert entry.poll_interval_s == 600.0  # learned cadence untouched
 
     def test_movement_adapts_poll_interval(self, temp_home, monkeypatch):
         h = self._harness(temp_home, monkeypatch, accounts=2)

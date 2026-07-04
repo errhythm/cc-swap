@@ -41,6 +41,14 @@ SERVE_TTL_S = 30.0  # fresher than this → serve without fetching
 STALE_OK_S = 300.0  # trusted for switch decisions; older → headroom unknown
 CLAIM_TTL_S = 10.0  # in-flight claim window: skip just-claimed accounts
 
+# Deliberate staleness (failure backoff, scheduler-chosen cadence) extends
+# decision trust past STALE_OK_S, but never past this ceiling: a forever-failing
+# account must eventually read as unknown so the unknown-path machinery
+# (escalate-all, unhealthy ticks, verified failover) takes back over. The
+# ceiling deliberately overrides even a Retry-After longer than itself —
+# trust must never be server-controlled and unbounded.
+TRUST_MAX_AGE_S = 3600.0
+
 # Failure backoff when the server sent no Retry-After: 30s · 2^(n-1), capped.
 # Conservative placeholders until issue #85's debug logs settle the real cause.
 BACKOFF_BASE_S = 30.0
@@ -74,7 +82,8 @@ class UsageEntry:
     """Read model of one account's usage state at collect time.
 
     ``sentinel`` is the collector's live overlay (never persisted); all other
-    fields mirror the stored row. ``age_s`` is the age of ``last_good``.
+    fields mirror the stored row, except ``age_s`` (the age of ``last_good``)
+    and ``trust_extended``, both computed at snapshot time.
     """
 
     sentinel: str | None = None
@@ -87,6 +96,11 @@ class UsageEntry:
     backoff_until: float | None = None
     next_poll_at: float | None = None
     poll_interval_s: float | None = None
+    # Staleness past STALE_OK_S is still decision-trusted when it is
+    # *deliberate*: the server is refusing fresher data (failure state), or the
+    # scheduler itself chose the cadence (within nextPollAt). Capped at
+    # TRUST_MAX_AGE_S. Computed by UsageStore.entries().
+    trust_extended: bool = False
 
     def fresh(self, now: float, ttl: float = SERVE_TTL_S) -> bool:
         return self.fetched_at is not None and (now - self.fetched_at) <= ttl
@@ -105,16 +119,16 @@ class UsageEntry:
         """The ``dict | sentinel | None`` value switch decisions run on.
 
         Sentinel wins; else last-good while it is recent enough to trust
-        (≤ ``STALE_OK_S``); else None (unknown). Display code reads
-        ``last_good``/``age_s`` directly instead — it may show older data,
-        annotated with its age.
+        (≤ ``STALE_OK_S``, or ``trust_extended`` for deliberate staleness);
+        else None (unknown). Display code reads ``last_good``/``age_s``
+        directly instead — it may show older data, annotated with its age.
         """
         if self.sentinel is not None:
             return self.sentinel
         if (
             self.last_good is not None
             and self.age_s is not None
-            and self.age_s <= STALE_OK_S
+            and (self.age_s <= STALE_OK_S or self.trust_extended)
         ):
             return self.last_good
         return None
@@ -231,16 +245,30 @@ class UsageStore:
             if not isinstance(fetched_at, (int, float)):
                 fetched_at = None
             last_good = row.get("lastGood")
+            age_s = (now - fetched_at) if fetched_at is not None else None
+            consecutive_failures = int(row.get("consecutiveFailures") or 0)
+            next_poll_at = _num_or_none(row.get("nextPollAt"))
+            # Strict < mirrors due_candidate: at nextPollAt the entry is due,
+            # its staleness no longer scheduler-chosen.
+            trust_extended = (
+                age_s is not None
+                and age_s <= TRUST_MAX_AGE_S
+                and (
+                    consecutive_failures > 0
+                    or (next_poll_at is not None and now < next_poll_at)
+                )
+            )
             out[num] = UsageEntry(
                 last_good=last_good if isinstance(last_good, dict) else None,
                 fetched_at=fetched_at,
-                age_s=(now - fetched_at) if fetched_at is not None else None,
+                age_s=age_s,
                 last_attempt_at=_num_or_none(row.get("lastAttemptAt")),
-                consecutive_failures=int(row.get("consecutiveFailures") or 0),
+                consecutive_failures=consecutive_failures,
                 last_error=row.get("lastError"),
                 backoff_until=_num_or_none(row.get("backoffUntil")),
-                next_poll_at=_num_or_none(row.get("nextPollAt")),
+                next_poll_at=next_poll_at,
                 poll_interval_s=_num_or_none(row.get("pollIntervalS")),
+                trust_extended=trust_extended,
             )
         return out
 

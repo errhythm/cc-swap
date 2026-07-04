@@ -220,12 +220,18 @@ def _classify_usage_error(e: Exception) -> tuple[str, float | None]:
     return type(e).__name__, None
 
 
-def _log_usage_failure(context: str, e: Exception, kind: str) -> None:
+def _log_usage_failure(
+    context: str, e: Exception, kind: str, retry_after_s: float | None = None
+) -> None:
     """One WARNING line with the cause so it lands in the default log file
     (issue #85 was undiagnosable with failures swallowed at DEBUG); the full
-    exception repr stays at DEBUG."""
+    exception repr stays at DEBUG. The line is what users paste into public
+    issues, so ``context`` must not carry the email, and the server's
+    Retry-After rides along when present (it answers the backoff-tuning
+    question without a second ask)."""
     where = f" {context}" if context else ""
-    _logger.warning("Usage fetch failed%s: %s", where, kind)
+    cause = kind if retry_after_s is None else f"{kind}, retry-after {retry_after_s:.0f}s"
+    _logger.warning("Usage fetch failed%s: %s", where, cause)
     _logger.debug("Usage fetch failure detail%s: %r", where, e)
 
 
@@ -364,7 +370,7 @@ def try_fetch_usage_for_account(
 
     Active accounts are never refreshed — Claude Code owns those credentials.
     """
-    context = f"for account {account_num} ({email})"
+    context = f"for account {account_num}"  # no email: paste-safe for public issues
     oauth = extract_oauth_data(credentials)
     access_token = oauth.get("accessToken") if oauth else None
     if not access_token:
@@ -395,7 +401,7 @@ def try_fetch_usage_for_account(
             or not oauth
             or not oauth.get("refreshToken")
         ):
-            _log_usage_failure(context, e, kind)
+            _log_usage_failure(context, e, kind, retry_after)
             return UsageOutcome(None, error=kind, retry_after_s=retry_after)
 
         # Retry once after refreshing on 401 (inactive accounts only).
@@ -416,11 +422,11 @@ def try_fetch_usage_for_account(
             return UsageOutcome(build_usage_result(data))
         except Exception as retry_error:
             kind, retry_after = _classify_usage_error(retry_error)
-            _log_usage_failure(context + " after refresh", retry_error, kind)
+            _log_usage_failure(context + " after refresh", retry_error, kind, retry_after)
             return UsageOutcome(None, error=kind, retry_after_s=retry_after)
     except Exception as e:
         kind, retry_after = _classify_usage_error(e)
-        _log_usage_failure(context, e, kind)
+        _log_usage_failure(context, e, kind, retry_after)
         return UsageOutcome(None, error=kind, retry_after_s=retry_after)
 
 

@@ -900,7 +900,12 @@ class TestTryFetchUsageOutcome:
         warnings = [
             r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
         ]
-        assert any("http-429" in m and "a@b.c" in m for m in warnings)
+        line = next(m for m in warnings if "http-429" in m)
+        # The line users paste into public issues: account number and the
+        # server's Retry-After, never the email.
+        assert "account 1" in line
+        assert "retry-after 42s" in line
+        assert "a@b.c" not in line
 
     def test_timeout_outcome(self):
         with patch(
