@@ -22,13 +22,13 @@ pipx install claude-swap
 git clone https://github.com/realiti4/claude-swap.git
 cd claude-swap
 uv sync
-uv run cswap --help
+uv run cswap help
 ```
 
 ### Updating
 
 ```bash
-cswap --upgrade        # uv/pipx installs on macOS/Linux: auto-detects and upgrades
+cswap upgrade          # uv/pipx installs on macOS/Linux: auto-detects and upgrades
 # or run your installer directly:
 uv tool upgrade claude-swap
 pipx upgrade claude-swap
@@ -41,7 +41,7 @@ pipx upgrade claude-swap
 Log into Claude Code with your first account, then:
 
 ```bash
-cswap --add-account
+cswap add
 ```
 
 ### Add more accounts
@@ -49,7 +49,7 @@ cswap --add-account
 Log in with another account, then:
 
 ```bash
-cswap --add-account
+cswap add
 ```
 
 ### Switch accounts
@@ -57,17 +57,17 @@ cswap --add-account
 Rotate to the next account:
 
 ```bash
-cswap --switch
+cswap switch
 ```
 
 Or switch to a specific account:
 
 ```bash
-cswap --switch-to 2
-cswap --switch-to user@example.com
+cswap switch 2
+cswap switch user@example.com
 ```
 
-Or let claude-swap auto-pick by remaining quota — `cswap --switch --strategy best` (most quota left) or `--strategy next-available` (skip rate-limited accounts).
+Or let claude-swap auto-pick by remaining quota — `cswap switch --strategy best` (most quota left) or `--strategy next-available` (skip rate-limited accounts).
 
 **Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
@@ -90,7 +90,7 @@ cswap auto --dry-run           # log what it would do, never switch
 - Usage polling is adaptive: each check polls the active account plus one alternate (whichever has the stalest data), and only refreshes everything when a switch is actually near — so API traffic stays flat no matter how many accounts you manage. An alternate whose usage is moving (in use on another machine or in session mode) gets watched more closely, an unchanging one backs off, and an exhausted one isn't polled again until its window resets.
 - A failed usage fetch doesn't blind it: the last-known usage keeps being trusted for a few minutes while retries back off (honoring the server's `Retry-After`), so a network blip can't trigger a spurious failover.
 - If the active account's token expires while Claude Code sits idle (typical after the PC wakes from sleep), auto holds and slows down instead of failing over — Claude Code refreshes the token itself on your next message, and nothing consumes quota in the meantime.
-- An account whose refresh token has died is quarantined — taken out of rotation and reported — until you log in with it and re-run `cswap --add-account --slot N`.
+- An account whose refresh token has died is quarantined — taken out of rotation and reported — until you log in with it and re-run `cswap add --slot N`.
 - API-key accounts are never rotated onto unless you pass `--include-api-key-accounts` (they bill per token).
 
 For cron/systemd timers, `--once` reports the outcome in its exit code (`0` switched, `1` error, `2` nothing to do, `3` blocked — no viable target), and `--json` emits one JSON event per line:
@@ -125,7 +125,7 @@ Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), 
 If an account's token expires, log back into Claude Code with that account and re-run:
 
 ```bash
-cswap --add-account
+cswap add
 ```
 
 This will update the stored credentials without creating a duplicate.
@@ -136,19 +136,21 @@ This will update the stored credentials without creating a duplicate.
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap auto                      # Auto-switch when nearing rate limits (see above)
 cswap config                    # Show or edit settings (see Configuration below)
-cswap --list                    # Show all accounts with 5h/7d usage and reset times
-cswap --status                  # Show current account
-cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
-cswap --remove-account 2        # Remove an account
-cswap --tui                     # Launch the interactive arrow-key menu
-cswap --upgrade                 # Upgrade claude-swap to the latest version
-cswap --purge                   # Remove all claude-swap data
+cswap list                      # Show all accounts with 5h/7d usage and reset times
+cswap status                    # Show current account
+cswap add --slot 3              # Add account to a specific slot (prompts before overwrite)
+cswap remove 2                  # Remove an account
+cswap tui                       # Launch the interactive arrow-key menu
+cswap upgrade                   # Upgrade claude-swap to the latest version
+cswap purge                     # Remove all claude-swap data
 ```
+
+The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working.
 
 ## Tips
 
 - **Do you need to restart after switching?** Usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message — no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
-- **Continuing sessions after switching:** You can keep using the same Claude Code session after switching — run `cswap --switch` in any terminal and carry on. If you'd prefer a clean start, close and reopen Claude Code (or the VS Code extension tab) and use `--resume` to pick your previous session. Either way, the first message on the new account may use extra usage as its conversation cache rebuilds.
+- **Continuing sessions after switching:** You can keep using the same Claude Code session after switching — run `cswap switch` in any terminal and carry on. If you'd prefer a clean start, close and reopen Claude Code (or the VS Code extension tab) and use `--resume` to pick your previous session. Either way, the first message on the new account may use extra usage as its conversation cache rebuilds.
 
 ## How it works
 
@@ -156,7 +158,7 @@ cswap --purge                   # Remove all claude-swap data
 - Swaps credentials when you switch accounts
 - Account credentials stored securely using platform-appropriate methods
 - Switches (manual and automatic) hold Claude Code's own credential locks while writing, so a swap never interleaves with a token refresh
-- Auto-switch freshens a target's token before activating it, and quarantines accounts whose refresh token has died (recover with `cswap --add-account --slot N`)
+- Auto-switch freshens a target's token before activating it, and quarantines accounts whose refresh token has died (recover with `cswap add --slot N`)
 
 ## Data locations
 
@@ -196,26 +198,26 @@ cswap config path                         # where settings.json lives
 Move account data between machines or back it up:
 
 ```bash
-cswap --export backup.cswap                  # All accounts to a file
-cswap --export backup.cswap --account 2      # One account
-cswap --export backup.cswap --full           # Include full local ~/.claude.json (same-PC backup)
-cswap --import backup.cswap                  # Skips accounts that already exist
-cswap --import backup.cswap --force          # Overwrite existing
+cswap export backup.cswap                    # All accounts to a file
+cswap export backup.cswap --account 2        # One account
+cswap export backup.cswap --full             # Include full local ~/.claude.json (same-PC backup)
+cswap import backup.cswap                    # Skips accounts that already exist
+cswap import backup.cswap --force            # Overwrite existing
 ```
 
-The export file is plaintext JSON. If you need encryption, pipe through your tool of choice (e.g. `cswap --export - | gpg -c > backup.gpg`).
+The export file is plaintext JSON. If you need encryption, pipe through your tool of choice (e.g. `cswap export - | gpg -c > backup.gpg`).
 
-If an imported account is the one you're currently logged in as, activate the imported credentials with `cswap --switch-to N --force` (a plain `--switch-to` of the current account is a safe no-op and won't touch the import).
+If an imported account is the one you're currently logged in as, activate the imported credentials with `cswap switch N --force` (a plain `switch` to the current account is a safe no-op and won't touch the import).
 
 ### JSON output for scripting
 
-Add `--json` to `--list`, `--status`, `--switch`, or `--switch-to` to emit a single machine-readable JSON object on stdout (human-readable notices go to stderr). Useful for scripting auto-swap and quota tracking.
+Add `--json` to `list`, `status`, or `switch` to emit a single machine-readable JSON object on stdout (human-readable notices go to stderr). Useful for scripting auto-swap and quota tracking.
 
 ```bash
-cswap --list --json                 # all accounts with usage/quota
-cswap --status --json               # current active account
-cswap --switch --strategy best --json   # switch, then report the result
-cswap --switch-to 2 --json
+cswap list --json                   # all accounts with usage/quota
+cswap status --json                 # current active account
+cswap switch --strategy best --json # switch, then report the result
+cswap switch 2 --json
 ```
 
 <details>
@@ -249,11 +251,11 @@ flow first — useful on headless servers or when receiving a token from another
 machine — register it directly. The token type is auto-detected:
 
 ```bash
-cswap --add-token sk-ant-oat01-...           # OAuth setup-token
-cswap --add-token sk-ant-api03-...           # managed API key
-cswap --add-token sk-ant-oat01-... --slot 3
-cswap --add-token - --slot 3                 # read token from stdin
-cswap --add-token --email user@example.com   # optional label override
+cswap add-token sk-ant-oat01-...             # OAuth setup-token
+cswap add-token sk-ant-api03-...             # managed API key
+cswap add-token sk-ant-oat01-... --slot 3
+cswap add-token - --slot 3                   # read token from stdin
+cswap add-token --email user@example.com     # optional label override
 ```
 
 `--email` is optional; omitted values use `setup-token-{slot}@token.local`
@@ -262,7 +264,7 @@ cswap --add-token --email user@example.com   # optional label override
 **API-key accounts.** An `sk-ant-api...` value registers a managed API-key account
 (the kind Claude Code uses after `/login` with a key) rather than an OAuth
 setup-token. It switches like any other account; since API keys have no subscription
-quota, they show no usage and the usage-aware `--switch` strategies never skip them as
+quota, they show no usage and the usage-aware `switch` strategies never skip them as
 rate-limited.
 
 ## Uninstall
@@ -270,7 +272,7 @@ rate-limited.
 Remove all data:
 
 ```bash
-cswap --purge
+cswap purge
 ```
 
 Then uninstall the tool:

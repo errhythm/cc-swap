@@ -14,6 +14,76 @@ from claude_swap.printer import dimmed, error, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
+def _prog_name() -> str:
+    """The command name to show in usage/help.
+
+    argparse otherwise defaults to ``os.path.basename(sys.argv[0])``, which for
+    an installed entry-point shim renders as an ugly absolute path (e.g.
+    ``python.exe C:\\Users\\me\\.local\\bin\\cswap``). We strip that down to the
+    bare command the user typed (``cswap`` / ``claude-swap``), falling back to
+    ``cswap`` for ``python -m claude_swap`` and odd launchers.
+    """
+    name = os.path.basename(sys.argv[0] or "")
+    for ext in (".exe", ".pyw", ".py"):
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    if not name or name in {"__main__", "python", "python3", "py"}:
+        return "cswap"
+    return name
+
+
+# Memorable subcommand aliases → the long-standing flags they expand to. Lets
+# users type `cswap list`, `cswap status`, `cswap add`, etc. instead of `--list`
+# / `--status` / `--add-account`, which all still work. `switch` is special-cased
+# below (a bare `switch` rotates; `switch <target>` jumps to one account) and
+# `run`/`auto` keep their own pre-dispatch parsers, so none of those are listed here.
+_SUBCOMMAND_FLAGS = {
+    "help": "--help",
+    "list": "--list",
+    "ls": "--list",
+    "status": "--status",
+    "add": "--add-account",
+    "add-token": "--add-token",
+    "remove": "--remove-account",
+    "rm": "--remove-account",
+    "export": "--export",
+    "import": "--import",
+    "purge": "--purge",
+    "upgrade": "--upgrade",
+    "update": "--upgrade",
+    "tui": "--tui",
+}
+
+
+def _translate_subcommand(argv: list[str]) -> list[str]:
+    """Rewrite a leading memorable subcommand into the equivalent flag argv.
+
+    ``argv`` is the args after the program name. The rewrite only fires when the
+    first token is a recognized verb (which never starts with '-'), so the
+    established ``--flag`` interface — and every existing test that drives it —
+    is left untouched. Tokens after the verb pass through verbatim, so flags
+    like ``--json``, ``--strategy``, ``--slot``, and ``--force`` keep combining
+    exactly as before (e.g. ``cswap switch --strategy best``, ``cswap list --json``).
+    """
+    if not argv:
+        return argv
+
+    verb, rest = argv[0], argv[1:]
+
+    if verb == "switch":
+        # Bare `switch` rotates; `switch <num|email>` jumps to that account.
+        if rest and not rest[0].startswith("-"):
+            return ["--switch-to", *rest]
+        return ["--switch", *rest]
+
+    flag = _SUBCOMMAND_FLAGS.get(verb)
+    if flag is not None:
+        return [flag, *rest]
+
+    return argv
+
+
 def _run_command(argv: list[str]) -> None:
     """Handle `cswap run NUM|EMAIL [--no-share] [-- <claude args>]`.
 
@@ -35,7 +105,7 @@ def _run_command(argv: list[str]) -> None:
         head, tail = argv, []
 
     parser = argparse.ArgumentParser(
-        prog="cswap run",
+        prog=f"{_prog_name()} run",
         description=(
             "[EXPERIMENTAL] Launch Claude Code as a stored account in this "
             "terminal only (the default login and other terminals are "
@@ -432,46 +502,61 @@ def _use_native_tls() -> None:
 def main() -> None:
     """Main entry point for the CLI."""
     _use_native_tls()
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
-        _run_command(sys.argv[2:])
+    argv = sys.argv[1:]
+
+    # `run` and `auto` keep their dedicated pre-dispatch parsers.
+    if argv and argv[0] == "run":
+        _run_command(argv[1:])
         return  # only reachable in tests where exec/exit is mocked
-    if len(sys.argv) > 1 and sys.argv[1] == "auto":
-        _auto_command(sys.argv[2:])
+    if argv and argv[0] == "auto":
+        _auto_command(argv[1:])
         return  # only reachable in tests where sys.exit is mocked
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
         return
 
+    # Memorable subcommands (`cswap switch <email>`, `cswap list`, `cswap help`, ...)
+    # are rewritten to the equivalent flags so the original `--flag` interface
+    # keeps working unchanged.
+    argv = _translate_subcommand(argv)
+
     parser = argparse.ArgumentParser(
+        prog=_prog_name(),
         description="Multi-Account Switcher for Claude Code",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  %(prog)s --add-account
-  %(prog)s --add-token sk-ant-oat01-...           # OAuth setup-token
-  %(prog)s --add-token sk-ant-api03-...           # managed API key
-  %(prog)s --add-token sk-ant-oat01-... --slot 3
-  %(prog)s --add-token sk-ant-oat01-... --email me@example.com
-  %(prog)s --add-token - --slot 3
-  %(prog)s --list
-  %(prog)s --switch
-  %(prog)s --switch --strategy best             # switch to the account with most quota left
-  %(prog)s --switch --strategy next-available   # rotate, skipping rate-limited accounts
-  %(prog)s --switch-to 2
-  %(prog)s --switch-to user@example.com
-  %(prog)s run 2                            # run account 2 in this terminal only
-  %(prog)s run 2 -- --resume                # forward args after '--' to claude
-  %(prog)s auto                             # auto-switch when nearing rate limits
-  %(prog)s auto --once                      # single auto-switch tick (cron-friendly)
-  %(prog)s config                           # show settings (settings.json)
+Commands:
+  %(prog)s help                       show this help
+  %(prog)s list                       list managed accounts
+  %(prog)s status                     show current account
+  %(prog)s switch                     rotate to the next account
+  %(prog)s switch <num|email>         switch to a specific account
+  %(prog)s add                        add the current account
+  %(prog)s add-token [TOKEN|-]        register a setup-token or API key
+  %(prog)s remove <num|email>         remove an account
+  %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
+  %(prog)s auto                       auto-switch when nearing rate limits
+  %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
+  %(prog)s export <path>              export accounts
+  %(prog)s import <path>              import accounts
+  %(prog)s tui                        interactive arrow-key menu
+  %(prog)s upgrade                    self-upgrade to latest
+  %(prog)s purge                      remove all claude-swap data
+
+Aliases: ls=list  rm=remove  update=upgrade
+
+Flags combine with subcommands:
+  %(prog)s switch --strategy best           # pick the account with most quota left
+  %(prog)s switch --strategy next-available # rotate, skipping rate-limited accounts
+  %(prog)s switch user@example.com
+  %(prog)s list --json
+  %(prog)s add --slot 3                      # add to a specific slot
+  %(prog)s add-token sk-ant-oat01-... --email me@example.com
+  %(prog)s run 2 -- --resume                 # forward args after '--' to claude
+  %(prog)s auto --once                       # single auto-switch tick (cron-friendly)
   %(prog)s config set autoswitch.threshold 80
-  %(prog)s --remove-account user@example.com
-  %(prog)s --status
-  %(prog)s --purge
-  %(prog)s --export backup.cswap
-  %(prog)s --import backup.cswap
-  %(prog)s --tui                              # interactive arrow-key menu
-  %(prog)s --upgrade                          # self-upgrade to latest version
+
+The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep working.
         """,
     )
 
@@ -614,7 +699,7 @@ Examples:
         ),
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.token_status and not args.list:
         parser.error("--token-status can only be used with --list")
