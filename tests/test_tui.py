@@ -412,6 +412,15 @@ class TestAddstrAnsi:
         # Must not raise.
         tui._addstr_ansi(screen, 4, 2, "x", max_width=10)
 
+    def test_extra_attr_ored_into_every_run(self):
+        screen = _stub_screen()
+        tui._addstr_ansi(
+            screen, 4, 2, "\x1b[1mAB\x1b[0mCD", max_width=10,
+            extra=tui.curses.A_REVERSE,
+        )
+        for c in screen.addstr.call_args_list:
+            assert c.args[-1] & tui.curses.A_REVERSE
+
 
 class TestPager:
     def test_returns_on_q(self):
@@ -525,6 +534,71 @@ class TestWatch:
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
             tui._watch_loop(screen, switcher, interval=5)
         assert mock_list.call_count == 1
+
+    def test_account_rows_locates_headers(self):
+        body = [
+            "Accounts:",
+            "  1: a@x.com [personal] (active)",
+            "     5h: 12%",
+            "  2: b@x.com [personal]",
+            "     5h: 40%",
+            "Running instances:",
+            "  ● claude   ~/proj  (1 session)",
+        ]
+        assert tui._watch_account_rows(body) == [(1, "1"), (3, "2")]
+
+    def test_account_rows_empty_without_headers(self):
+        assert tui._watch_account_rows(["Accounts:", "  none yet"]) == []
+
+    def test_s_selects_row_and_switches(self, temp_home: Path):
+        _make_seq(temp_home, [("1", "a@x.com"), ("2", "b@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+
+        def _print_accounts():
+            print("Accounts:")
+            print("  1: a@x.com [personal] (active)")
+            print("  2: b@x.com [personal]")
+
+        # s → enter select, ↓ → row 2, Enter → switch (stays in watch, no
+        # pager), q → quit watch.
+        screen.getch.side_effect = [
+            ord("s"), tui.curses.KEY_DOWN, 10, ord("q"),
+        ]
+        with patch.object(switcher, "list_accounts", side_effect=_print_accounts), \
+             patch.object(switcher, "switch_to") as mock_switch, \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+            tui._watch_loop(screen, switcher, interval=5)
+        mock_switch.assert_called_once_with("2")
+
+    def test_select_cancel_does_not_switch(self, temp_home: Path):
+        _make_seq(temp_home, [("1", "a@x.com"), ("2", "b@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+
+        def _print_accounts():
+            print("Accounts:")
+            print("  1: a@x.com [personal] (active)")
+            print("  2: b@x.com [personal]")
+
+        screen.getch.side_effect = [ord("s"), 27, ord("q")]  # s, Esc, q
+        with patch.object(switcher, "list_accounts", side_effect=_print_accounts), \
+             patch.object(switcher, "switch_to") as mock_switch, \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+            tui._watch_loop(screen, switcher, interval=5)
+        mock_switch.assert_not_called()
+
+    def test_s_is_noop_without_accounts(self, temp_home: Path):
+        _make_seq(temp_home, [("1", "a@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+        # list_accounts prints nothing → no header rows → 's' cannot enter select.
+        screen.getch.side_effect = [ord("s"), ord("q")]
+        with patch.object(switcher, "list_accounts"), \
+             patch.object(switcher, "switch_to") as mock_switch, \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+            tui._watch_loop(screen, switcher, interval=5)
+        mock_switch.assert_not_called()
 
 
 class TestInitColors:
