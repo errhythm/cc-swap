@@ -1790,6 +1790,10 @@ class ClaudeAccountSwitcher:
         print(bolded("Accounts:"))
         for i, (num, email, org_name, org_uuid, is_active, _) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
+            # NOTE: the TUI watch view (tui._watch_account_rows) parses this
+            # output to map rows to accounts for quick-switch: it relies on the
+            # uncolored ``  {num}: `` prefix and the ``(active)`` marker below.
+            # Keep them intact when tweaking this line, or update that parser.
             if is_active:
                 marker = f" {bold_accent('(active)')}"
                 print(f"  {num}: {email} {muted(f'[{tag}]')}{marker}")

@@ -146,8 +146,15 @@ def _style_to_attr(flags: int) -> int:
     return attr
 
 
-def _addstr_ansi(stdscr, y: int, x: int, text: str, max_width: int) -> None:
-    """Draw an ANSI-styled line clipped to ``max_width`` visible characters."""
+def _addstr_ansi(
+    stdscr, y: int, x: int, text: str, max_width: int, extra: int = 0
+) -> None:
+    """Draw an ANSI-styled line clipped to ``max_width`` visible characters.
+
+    ``extra`` is OR-ed into every segment's attribute, so callers can layer a
+    whole-line effect (e.g. ``curses.A_REVERSE`` to highlight a selected row)
+    on top of the text's own styling.
+    """
     remaining = max_width
     cx = x
     for seg_text, flags in _ansi_segments(text):
@@ -155,7 +162,7 @@ def _addstr_ansi(stdscr, y: int, x: int, text: str, max_width: int) -> None:
             break
         chunk = seg_text[:remaining]
         try:
-            stdscr.addstr(y, cx, chunk, _style_to_attr(flags))
+            stdscr.addstr(y, cx, chunk, _style_to_attr(flags) | extra)
         except curses.error:
             pass
         cx += len(chunk)
@@ -332,21 +339,32 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
     try:
         last_refresh = 0.0
         body: list[str] = []
+        selecting = False  # arrow-key quick-switch overlay (paused refresh)
+        selected = 0
         while True:
             now = time.monotonic()
-            if now - last_refresh >= interval:
+            # Freeze the view while selecting so rows don't shift under the cursor.
+            if not selecting and now - last_refresh >= interval:
                 body = _capture(lambda: switcher.list_accounts()).splitlines()
                 now = time.monotonic()  # recompute after the (possibly slow) fetch
                 last_refresh = now
 
+            acct_rows = _watch_account_rows(body)
+            if selecting and acct_rows:
+                selected %= len(acct_rows)  # keep in range if the list shrank
+            sel_line = acct_rows[selected][0] if (selecting and acct_rows) else -1
+
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
             _draw_header(stdscr, "Watch", _status_line(switcher), cols)
-            age = int(now - last_refresh)
-            meta = (
-                f"every {interval}s · updated {age}s ago · "
-                f"[+/-] interval  [r] refresh  [q] back"
-            )
+            if selecting:
+                meta = "switch to · [↑/↓] move  [Enter] select  [Esc] cancel"
+            else:
+                age = int(now - last_refresh)
+                meta = (
+                    f"every {interval}s · updated {age}s ago · "
+                    f"[s] switch  [+/-] interval  [r] refresh  [q] back"
+                )
             try:
                 stdscr.addstr(3, 2, meta[: cols - 4], curses.A_DIM)
             except curses.error:
@@ -356,12 +374,37 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
                 y = body_top + i
                 if y >= rows - 1:
                     break
-                _addstr_ansi(stdscr, y, 2, line, cols - 4)
+                extra = curses.A_REVERSE if i == sel_line else 0
+                _addstr_ansi(stdscr, y, 2, line, cols - 4, extra)
             stdscr.refresh()
 
             key = stdscr.getch()
-            if key in (ord("q"), 27):
+            if selecting:
+                if key in (curses.KEY_UP, ord("k")):
+                    selected = (selected - 1) % len(acct_rows)
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    selected = (selected + 1) % len(acct_rows)
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    num = acct_rows[selected][1]
+                    # Apply the switch and stay in the watch view on success —
+                    # no intermediate pager. On failure (lock timeout, keychain,
+                    # account removed meanwhile) switch_to's output would be
+                    # swallowed, so surface it in the pager like _do_switch.
+                    out = _capture(lambda: switcher.switch_to(num))
+                    selecting = False
+                    last_refresh = 0.0  # re-fetch to show the new active account
+                    if _capture_has_error(out):
+                        stdscr.timeout(-1)  # pager expects blocking input
+                        _pager(stdscr, "Switch account", out.splitlines())
+                        stdscr.timeout(250)
+                elif key in (27, ord("q"), ord("s")):
+                    selecting = False
+            elif key in (ord("q"), 27):
                 return
+            elif key == ord("s"):
+                if acct_rows:
+                    selecting = True
+                    selected = _watch_active_index(acct_rows, body)
             elif key in (ord("+"), ord("=")):
                 interval = _clamp_interval(interval + 1)
             elif key in (ord("-"), ord("_")):
@@ -375,6 +418,47 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Account header lines in ``list_accounts()`` output look like ``  1: email …``.
+# The numeric prefix is printed without color, so matching the raw (still-ANSI)
+# captured line works.
+_WATCH_ACCT_RE = re.compile(r"^  (\d+): ")
+
+
+def _watch_account_rows(body: list[str]) -> list[tuple[int, str]]:
+    """Locate account header lines in captured ``list_accounts()`` output.
+
+    Returns ``(line_index, account_number)`` for each account block so the watch
+    view can highlight and quick-switch to a selected account.
+    """
+    rows: list[tuple[int, str]] = []
+    for i, line in enumerate(body):
+        m = _WATCH_ACCT_RE.match(line)
+        if m:
+            rows.append((i, m.group(1)))
+    return rows
+
+
+def _watch_active_index(acct_rows: list[tuple[int, str]], body: list[str]) -> int:
+    """Index into ``acct_rows`` of the account shown as active, else 0.
+
+    Matches the ``(active)`` marker ``list_accounts()`` prints so quick-switch
+    selection starts on the row the user is currently on.
+    """
+    for i, (line_idx, _num) in enumerate(acct_rows):
+        if "(active)" in body[line_idx]:
+            return i
+    return 0
+
+
+def _capture_has_error(captured: str) -> bool:
+    """True if ``_capture`` output signals a failure (an ``Error:`` line).
+
+    ``_capture`` renders a swallowed ClaudeSwitchError/EOFError as ``Error: …``
+    (uncolored); a successful switch never prints that, so this cleanly tells
+    the two apart without inspecting exceptions.
+    """
+    return any(line.startswith("Error:") for line in captured.splitlines())
 
 
 def _status_line(switcher: ClaudeAccountSwitcher) -> str:
