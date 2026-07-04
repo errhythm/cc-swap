@@ -555,6 +555,21 @@ class ClaudeAccountSwitcher:
         accounts_info = self._build_accounts_info()
         return self._collect_usage_entries(accounts_info, fetch=fetch)
 
+    def usage_fetch_stamps(self) -> dict[str, float | None]:
+        """Per-slot ``fetchedAt`` snapshot from the usage store — a pure file
+        read (no fetching, no credential access). The TUI watch view diffs
+        consecutive snapshots to flash rows whose usage just refreshed.
+        """
+        data = self._get_sequence_data() or {}
+        identities = {
+            num: (info.get("email", ""), info.get("organizationUuid", "") or "")
+            for num, info in data.get("accounts", {}).items()
+        }
+        return {
+            num: entry.fetched_at
+            for num, entry in self._usage_store.entries(identities).items()
+        }
+
     def set_usage_poll_plan(
         self, plans: dict[str, tuple[float | None, float | None]]
     ) -> None:
@@ -1762,11 +1777,16 @@ class ClaudeAccountSwitcher:
         self,
         show_token_status: bool = False,
         json_output: bool = False,
+        fetch: set[str] | None = None,
     ) -> dict | None:
         """List all managed accounts.
 
         In ``json_output`` mode, returns the schema-v1 payload (printing nothing)
         for the CLI to serialize; otherwise prints the human view and returns None.
+
+        ``fetch`` restricts which accounts *may* be fetched this pass (the TUI
+        watch view's adaptive set); ``None`` — the CLI default — leaves every
+        stale account eligible.
         """
         if not self.sequence_file.exists():
             # JSON mode must never prompt — emit an empty list instead of the
@@ -1782,7 +1802,7 @@ class ClaudeAccountSwitcher:
             return None
 
         accounts_info = self._build_accounts_info()
-        entries = self._collect_usage_entries(accounts_info)
+        entries = self._collect_usage_entries(accounts_info, fetch=fetch)
 
         if json_output:
             return self._build_list_payload(accounts_info, entries)

@@ -25,7 +25,7 @@ from typing import Callable
 
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap import printer
+from claude_swap import printer, usage_store
 
 
 # Minimum terminal size we render in. Below this, we bail to plain CLI advice.
@@ -82,9 +82,16 @@ def _ansi_segments(text: str) -> list[tuple[str, int]]:
     return [(t, f) for (t, f) in segments if t != ""] or [("", 0)]
 
 
-def _clamp_interval(n: int, lo: int = 1, hi: int = 60) -> int:
-    """Clamp a watch refresh interval (seconds) into ``[lo, hi]``."""
-    return max(lo, min(hi, n))
+# Watch view recapture cadence. Fixed, not user-tunable: data freshness is
+# governed by the usage store (SERVE_TTL_S + adaptive fetch set), so a knob
+# here would only change redraw cadence while looking like a freshness
+# control. 3s, not 1s, because each recapture also scans processes
+# (get_running_instances).
+_WATCH_RECAPTURE_S = 3.0
+
+# How long a just-refreshed account block stays highlighted. Long enough to
+# catch the eye across a couple of 250ms ticks, short enough to stay subtle.
+_WATCH_FLASH_S = 1.5
 
 
 # Curses color pair numbers (initialized lazily by _init_colors).
@@ -328,24 +335,90 @@ def _do_watch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     _watch_loop(stdscr, switcher)
 
 
-def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> None:
-    """Re-capture ``list_accounts()`` every ``interval`` seconds and redraw.
+def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+    """Re-capture ``list_accounts()`` every ``_WATCH_RECAPTURE_S`` and redraw.
 
-    Usage comes from the per-account store (usage_store.SERVE_TTL_S, 30s):
-    redraws inside that window re-render stored usage rather than re-fetching
-    from the network.
+    Network traffic is decoupled from the recapture cadence, mirroring the
+    ``cswap auto`` discipline: each recapture passes ``list_accounts`` a fetch
+    set of the active account plus — at most once per ``SERVE_TTL_S`` — the
+    stalest due alternate (``usage_store.due_candidate``), so a watch window
+    left open costs O(1) requests per TTL window regardless of account count.
+    The store's own gates (freshness, backoff/Retry-After, claims) apply on
+    top, and watch never writes poll plans — auto stays the cadence learner.
+    ``r`` forces a full on-demand pass (every stale account eligible), still
+    bounded by those gates.
+
+    Because updates are rare by design, two cues keep the view visibly alive:
+    the meta line reads ``refreshing…`` while a (blocking) capture runs, and an
+    account whose store ``fetchedAt`` advanced since the previous capture has
+    its block bolded for ``_WATCH_FLASH_S`` — both track real store activity,
+    never a timer.
     """
     stdscr.timeout(250)  # non-blocking getch, 250ms tick
     try:
         last_refresh = 0.0
+        next_alt = 0.0  # monotonic time an alternate may next join the fetch set
+        force_full = False
         body: list[str] = []
         selecting = False  # arrow-key quick-switch overlay (paused refresh)
         selected = 0
+        stamps: dict[str, float | None] = {}  # fetchedAt per slot, last capture
+        flash_nums: set[str] = set()
+        flash_until = 0.0
         while True:
             now = time.monotonic()
             # Freeze the view while selecting so rows don't shift under the cursor.
-            if not selecting and now - last_refresh >= interval:
-                body = _capture(lambda: switcher.list_accounts()).splitlines()
+            if not selecting and (
+                force_full or now - last_refresh >= _WATCH_RECAPTURE_S
+            ):
+                if force_full:
+                    force_full = False
+                    fetch: set[str] | None = None  # every stale account eligible
+                    next_alt = now + usage_store.SERVE_TTL_S
+                else:
+                    active = switcher.current_account_number()
+                    fetch = {active} if active else set()
+                    if now >= next_alt:
+                        # Snapshot the store (no network) to pick the stalest due
+                        # alternate. Reset the timer even when nothing is due:
+                        # this branch reads credentials, so it must not run on
+                        # every recapture.
+                        entries = switcher.usage_entries_by_account(fetch=set())
+                        candidates = [
+                            n
+                            for n in switcher.switchable_account_numbers()
+                            if n != active
+                        ]
+                        pick = usage_store.due_candidate(
+                            candidates, entries, time.time()
+                        )
+                        if pick is not None:
+                            fetch.add(pick)
+                        next_alt = now + usage_store.SERVE_TTL_S
+                # Announce the (blocking) capture on the meta line: visible for
+                # the duration of a real network fetch, gone in a flicker when
+                # the store serves everything.
+                try:
+                    stdscr.move(3, 0)
+                    stdscr.clrtoeol()
+                    stdscr.addstr(3, 2, "refreshing…", curses.A_DIM)
+                    stdscr.refresh()
+                except curses.error:
+                    pass
+                body = _capture(
+                    lambda: switcher.list_accounts(fetch=fetch)
+                ).splitlines()
+                new_stamps = switcher.usage_fetch_stamps()
+                if stamps:  # first capture is the baseline — nothing to diff
+                    changed = {
+                        num
+                        for num, ts in new_stamps.items()
+                        if ts is not None and ts != stamps.get(num)
+                    }
+                    if changed:
+                        flash_nums = changed
+                        flash_until = time.monotonic() + _WATCH_FLASH_S
+                stamps = new_stamps
                 now = time.monotonic()  # recompute after the (possibly slow) fetch
                 last_refresh = now
 
@@ -354,17 +427,17 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
                 selected %= len(acct_rows)  # keep in range if the list shrank
             sel_line = acct_rows[selected][0] if (selecting and acct_rows) else -1
 
+            if flash_nums and now >= flash_until:
+                flash_nums = set()
+            flash_lines = _watch_block_lines(body, acct_rows, flash_nums)
+
             stdscr.erase()
             rows, cols = stdscr.getmaxyx()
             _draw_header(stdscr, "Watch", _status_line(switcher), cols)
             if selecting:
                 meta = "switch to · [↑/↓] move  [Enter] select  [Esc] cancel"
             else:
-                age = int(now - last_refresh)
-                meta = (
-                    f"every {interval}s · updated {age}s ago · "
-                    f"[s] switch  [+/-] interval  [r] refresh  [q] back"
-                )
+                meta = "[s] switch  [r] refresh  [q] back"
             try:
                 stdscr.addstr(3, 2, meta[: cols - 4], curses.A_DIM)
             except curses.error:
@@ -374,7 +447,12 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
                 y = body_top + i
                 if y >= rows - 1:
                     break
-                extra = curses.A_REVERSE if i == sel_line else 0
+                if i == sel_line:
+                    extra = curses.A_REVERSE
+                elif i in flash_lines:
+                    extra = curses.A_BOLD
+                else:
+                    extra = 0
                 _addstr_ansi(stdscr, y, 2, line, cols - 4, extra)
             stdscr.refresh()
 
@@ -405,12 +483,8 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
                 if acct_rows:
                     selecting = True
                     selected = _watch_active_index(acct_rows, body)
-            elif key in (ord("+"), ord("=")):
-                interval = _clamp_interval(interval + 1)
-            elif key in (ord("-"), ord("_")):
-                interval = _clamp_interval(interval - 1)
             elif key == ord("r"):
-                last_refresh = 0.0
+                force_full = True
     finally:
         stdscr.timeout(-1)  # restore blocking input
 
@@ -437,6 +511,24 @@ def _watch_account_rows(body: list[str]) -> list[tuple[int, str]]:
         if m:
             rows.append((i, m.group(1)))
     return rows
+
+
+def _watch_block_lines(
+    body: list[str], acct_rows: list[tuple[int, str]], nums: set[str]
+) -> set[int]:
+    """Line indexes of the account blocks for ``nums``: each header row plus
+    its indented detail (usage) lines, used to highlight just-updated accounts.
+    """
+    lines: set[int] = set()
+    for line_idx, num in acct_rows:
+        if num not in nums:
+            continue
+        lines.add(line_idx)
+        j = line_idx + 1
+        while j < len(body) and body[j].startswith("     "):
+            lines.add(j)
+            j += 1
+    return lines
 
 
 def _watch_active_index(acct_rows: list[tuple[int, str]], body: list[str]) -> int:

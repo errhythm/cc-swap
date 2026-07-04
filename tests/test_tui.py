@@ -337,21 +337,6 @@ class TestCliIntegration:
         mock_run.assert_called_once_with(switcher_cls.return_value)
 
 
-class TestClampInterval:
-    def test_in_range(self):
-        assert tui._clamp_interval(5) == 5
-
-    def test_below_min(self):
-        assert tui._clamp_interval(0) == 1
-        assert tui._clamp_interval(-3) == 1
-
-    def test_above_max(self):
-        assert tui._clamp_interval(999) == 60
-
-    def test_custom_bounds(self):
-        assert tui._clamp_interval(100, lo=2, hi=10) == 10
-
-
 class TestAnsiSegments:
     def test_plain_text_single_run(self):
         assert tui._ansi_segments("hello") == [("hello", 0)]
@@ -518,22 +503,158 @@ class TestWatch:
         screen.getch.side_effect = [ord("q")]
         with patch.object(switcher, "list_accounts") as mock_list, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
+            tui._watch_loop(screen, switcher)
         mock_list.assert_called()  # at least one refresh before quit
         screen.timeout.assert_any_call(250)
         screen.timeout.assert_any_call(-1)
 
-    def test_plus_raises_interval(self, temp_home: Path):
+    def test_passive_fetch_set_is_active_plus_one_alternate(self, temp_home: Path):
+        """The passive loop fetches the active account plus — at most once per
+        SERVE_TTL_S — the stalest due alternate, never every account."""
+        _make_seq(temp_home, [("1", "a@x.com"), ("2", "b@x.com"), ("3", "c@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+        clock = {"t": 100.0}
+        keys = iter([-1, ord("q")])
+
+        def _getch():
+            clock["t"] += tui._WATCH_RECAPTURE_S  # step past the recapture gate
+            return next(keys)
+
+        screen.getch.side_effect = _getch
+        with patch.object(switcher, "list_accounts") as mock_list, \
+             patch.object(switcher, "current_account_number", return_value="1"), \
+             patch.object(switcher, "switchable_account_numbers",
+                          return_value=["1", "2", "3"]), \
+             patch.object(switcher, "usage_entries_by_account",
+                          return_value={}) as mock_entries, \
+             patch("claude_swap.tui.time.monotonic",
+                   side_effect=lambda: clock["t"]):
+            tui._watch_loop(screen, switcher)
+
+        # Recapture 1: active + the stalest due alternate (never-fetched → "2").
+        assert mock_list.call_args_list[0].kwargs["fetch"] == {"1", "2"}
+        # Recapture 2, 3s later inside the same TTL window: active only — the
+        # alternate slot (and its store snapshot) is paced at one per SERVE_TTL_S.
+        assert mock_list.call_args_list[1].kwargs["fetch"] == {"1"}
+        mock_entries.assert_called_once()
+
+    def test_r_forces_full_on_demand_refresh(self, temp_home: Path):
+        """'r' recaptures immediately with fetch=None (every stale account
+        eligible), not the adaptive set."""
+        _make_seq(temp_home, [("1", "a@x.com"), ("2", "b@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+        screen.getch.side_effect = [ord("r"), ord("q")]
+        with patch.object(switcher, "list_accounts") as mock_list, \
+             patch.object(switcher, "current_account_number", return_value="1"), \
+             patch.object(switcher, "switchable_account_numbers",
+                          return_value=["1", "2"]), \
+             patch.object(switcher, "usage_entries_by_account", return_value={}), \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+            tui._watch_loop(screen, switcher)
+        assert mock_list.call_args_list[0].kwargs["fetch"] == {"1", "2"}
+        assert mock_list.call_args_list[1].kwargs["fetch"] is None
+
+    def test_updated_account_flashes(self, temp_home: Path):
+        """An account whose store fetchedAt advanced since the previous
+        capture gets its block (header + detail lines) bolded briefly."""
+        _make_seq(temp_home, [("1", "a@x.com"), ("2", "b@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+        clock = {"t": 100.0}
+        keys = iter([-1, ord("q")])
+
+        def _getch():
+            clock["t"] += tui._WATCH_RECAPTURE_S
+            return next(keys)
+
+        screen.getch.side_effect = _getch
+
+        def _print_accounts(fetch=None):
+            print("Accounts:")
+            print("  1: a@x.com [personal] (active)")
+            print("     └ 5h: 12%")
+            print("  2: b@x.com [personal]")
+
+        with patch.object(switcher, "list_accounts", side_effect=_print_accounts), \
+             patch.object(switcher, "current_account_number", return_value="1"), \
+             patch.object(switcher, "switchable_account_numbers",
+                          return_value=[]), \
+             patch.object(switcher, "usage_entries_by_account", return_value={}), \
+             patch.object(switcher, "usage_fetch_stamps",
+                          side_effect=[{"1": 50.0, "2": None},
+                                       {"1": 103.0, "2": None}]), \
+             patch("claude_swap.tui._addstr_ansi") as mock_draw, \
+             patch("claude_swap.tui.time.monotonic",
+                   side_effect=lambda: clock["t"]):
+            tui._watch_loop(screen, switcher)
+
+        def _extras(prefix: str) -> list[int]:
+            return [
+                c.args[5]
+                for c in mock_draw.call_args_list
+                if c.args[3].startswith(prefix)
+            ]
+
+        # Account 1 refreshed between captures → its header and detail line
+        # flash bold; account 2 (no new fetch) never does.
+        assert tui.curses.A_BOLD in _extras("  1:")
+        assert tui.curses.A_BOLD in _extras("     └")
+        assert set(_extras("  2:")) == {0}
+
+    def test_refreshing_notice_precedes_capture(self, temp_home: Path):
         _make_seq(temp_home, [("1", "a@x.com")])
         switcher = ClaudeAccountSwitcher()
         screen = _stub_screen()
-        # First loop refreshes (monotonic 100), then '+' (interval→6),
-        # then 'q'. monotonic stays 100 so no second refresh.
-        screen.getch.side_effect = [ord("+"), ord("q")]
-        with patch.object(switcher, "list_accounts") as mock_list, \
+        screen.getch.side_effect = [ord("q")]
+        with patch.object(switcher, "list_accounts"), \
+             patch.object(switcher, "current_account_number", return_value="1"), \
+             patch.object(switcher, "switchable_account_numbers",
+                          return_value=[]), \
+             patch.object(switcher, "usage_entries_by_account", return_value={}), \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
-        assert mock_list.call_count == 1
+            tui._watch_loop(screen, switcher)
+        texts = [
+            c.args[2]
+            for c in screen.addstr.call_args_list
+            if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
+        assert any("refreshing…" in t for t in texts)
+
+    def test_block_lines_cover_header_and_details(self):
+        body = [
+            "Accounts:",
+            "  1: a@x.com [personal] (active)",
+            "     ├ 5h: 12%",
+            "     └ 7d: 40%",
+            "  2: b@x.com [personal]",
+            "     └ 5h: 80%",
+        ]
+        rows = tui._watch_account_rows(body)
+        assert tui._watch_block_lines(body, rows, {"1"}) == {1, 2, 3}
+        assert tui._watch_block_lines(body, rows, {"2"}) == {4, 5}
+        assert tui._watch_block_lines(body, rows, set()) == set()
+
+    def test_meta_line_has_no_interval_knob(self, temp_home: Path):
+        _make_seq(temp_home, [("1", "a@x.com")])
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+        screen.getch.side_effect = [ord("q")]
+        with patch.object(switcher, "list_accounts"), \
+             patch.object(switcher, "current_account_number", return_value="1"), \
+             patch.object(switcher, "switchable_account_numbers",
+                          return_value=["1"]), \
+             patch.object(switcher, "usage_entries_by_account", return_value={}), \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+            tui._watch_loop(screen, switcher)
+        texts = [
+            c.args[2]
+            for c in screen.addstr.call_args_list
+            if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
+        assert any("[s] switch  [r] refresh  [q] back" in t for t in texts)
+        assert not any("interval" in t or "+/-" in t for t in texts)
 
     def test_account_rows_locates_headers(self):
         body = [
@@ -555,7 +676,7 @@ class TestWatch:
         switcher = ClaudeAccountSwitcher()
         screen = _stub_screen()
 
-        def _print_accounts():
+        def _print_accounts(fetch=None):
             print("Accounts:")
             print("  1: a@x.com [personal] (active)")
             print("  2: b@x.com [personal]")
@@ -568,7 +689,7 @@ class TestWatch:
         with patch.object(switcher, "list_accounts", side_effect=_print_accounts), \
              patch.object(switcher, "switch_to") as mock_switch, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
+            tui._watch_loop(screen, switcher)
         mock_switch.assert_called_once_with("2")
 
     def test_select_cancel_does_not_switch(self, temp_home: Path):
@@ -576,7 +697,7 @@ class TestWatch:
         switcher = ClaudeAccountSwitcher()
         screen = _stub_screen()
 
-        def _print_accounts():
+        def _print_accounts(fetch=None):
             print("Accounts:")
             print("  1: a@x.com [personal] (active)")
             print("  2: b@x.com [personal]")
@@ -585,7 +706,7 @@ class TestWatch:
         with patch.object(switcher, "list_accounts", side_effect=_print_accounts), \
              patch.object(switcher, "switch_to") as mock_switch, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
+            tui._watch_loop(screen, switcher)
         mock_switch.assert_not_called()
 
     def test_s_is_noop_without_accounts(self, temp_home: Path):
@@ -597,7 +718,7 @@ class TestWatch:
         with patch.object(switcher, "list_accounts"), \
              patch.object(switcher, "switch_to") as mock_switch, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
+            tui._watch_loop(screen, switcher)
         mock_switch.assert_not_called()
 
     def test_active_index_finds_active_row(self):
@@ -615,7 +736,7 @@ class TestWatch:
         switcher = ClaudeAccountSwitcher()
         screen = _stub_screen()
 
-        def _print_accounts():
+        def _print_accounts(fetch=None):
             print("Accounts:")
             print("  1: a@x.com [personal]")
             print("  2: b@x.com [personal] (active)")  # account 2 is active
@@ -625,7 +746,7 @@ class TestWatch:
         with patch.object(switcher, "list_accounts", side_effect=_print_accounts), \
              patch.object(switcher, "switch_to") as mock_switch, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
+            tui._watch_loop(screen, switcher)
         mock_switch.assert_called_once_with("2")
 
     def test_capture_has_error(self):
@@ -638,7 +759,7 @@ class TestWatch:
         switcher = ClaudeAccountSwitcher()
         screen = _stub_screen()
 
-        def _print_accounts():
+        def _print_accounts(fetch=None):
             print("Accounts:")
             print("  1: a@x.com [personal] (active)")
             print("  2: b@x.com [personal]")
@@ -650,7 +771,7 @@ class TestWatch:
                           side_effect=ClaudeSwitchError("lock timeout")), \
              patch("claude_swap.tui._pager") as mock_pager, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
+            tui._watch_loop(screen, switcher)
         mock_pager.assert_called_once()
         paged_lines = mock_pager.call_args.args[2]
         assert any("lock timeout" in line for line in paged_lines)

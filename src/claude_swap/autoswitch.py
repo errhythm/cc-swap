@@ -48,6 +48,7 @@ from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
 from claude_swap.locking import FileLock
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json
 from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.usage_store import due_candidate
 
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
@@ -821,7 +822,7 @@ class AutoSwitchEngine:
         pre = self.switcher.usage_entries_by_account(fetch=set())
         plan: set[str] = {current}
         if self._idle_hold_since is None:
-            pick = self._due_candidate(candidates, pre, now)
+            pick = due_candidate(candidates, pre, now)
             if pick is not None:
                 plan.add(pick)
         entries = self.switcher.usage_entries_by_account(fetch=plan)
@@ -852,38 +853,6 @@ class AutoSwitchEngine:
         if not self.dry_run:
             self._update_poll_plans(candidates, pre, entries, now)
         return entries, usage, headroom
-
-    @staticmethod
-    def _due_candidate(
-        candidates: list[str], entries: dict, now: float
-    ) -> str | None:
-        """The due candidate with the stalest data, or None.
-
-        Due = past its ``nextPollAt`` and not in failure backoff. Sentinel
-        accounts (api-key / no credentials) have nothing to fetch. A
-        perpetually failing account can't monopolize the slot: its backoff
-        removes it from the due set between attempts.
-        """
-        due: list[tuple[int, float, str]] = []
-        for num in candidates:
-            entry = entries.get(num)
-            if entry is None:
-                due.append((0, 0.0, num))
-                continue
-            if entry.sentinel is not None:
-                continue
-            if entry.in_backoff(now):
-                continue
-            if entry.next_poll_at is not None and now < entry.next_poll_at:
-                continue
-            if entry.fetched_at is None:
-                due.append((0, 0.0, num))
-            else:
-                due.append((1, entry.fetched_at, num))
-        if not due:
-            return None
-        due.sort()
-        return due[0][2]
 
     def _update_poll_plans(
         self, candidates: list[str], pre: dict, post: dict, now: float

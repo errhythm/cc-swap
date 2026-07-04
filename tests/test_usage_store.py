@@ -16,6 +16,7 @@ from claude_swap.usage_store import (
     FetchRecord,
     UsageEntry,
     UsageStore,
+    due_candidate,
     with_sentinel,
 )
 
@@ -231,3 +232,47 @@ class TestPollPlan:
         entry = store.entries(IDENT)["1"]
         assert entry.next_poll_at is None
         assert entry.poll_interval_s is None
+
+
+class TestDueCandidate:
+    """Candidate selection shared by the auto engine and the TUI watch view."""
+
+    NOW = 1_000_000.0
+
+    def test_missing_entry_is_most_due(self):
+        entries = {"3": UsageEntry(fetched_at=self.NOW - 60, age_s=60.0)}
+        assert due_candidate(["2", "3"], entries, self.NOW) == "2"
+
+    def test_never_fetched_beats_fetched(self):
+        entries = {
+            "2": UsageEntry(fetched_at=self.NOW - 999, age_s=999.0),
+            "3": UsageEntry(),  # row exists but never fetched
+        }
+        assert due_candidate(["2", "3"], entries, self.NOW) == "3"
+
+    def test_stalest_fetched_wins(self):
+        entries = {
+            "2": UsageEntry(fetched_at=self.NOW - 60, age_s=60.0),
+            "3": UsageEntry(fetched_at=self.NOW - 300, age_s=300.0),
+        }
+        assert due_candidate(["2", "3"], entries, self.NOW) == "3"
+
+    def test_sentinel_accounts_skipped(self):
+        entries = {"2": UsageEntry(sentinel="api-key")}
+        assert due_candidate(["2"], entries, self.NOW) is None
+
+    def test_backoff_skipped_until_it_expires(self):
+        entries = {"2": UsageEntry(backoff_until=self.NOW + 10)}
+        assert due_candidate(["2"], entries, self.NOW) is None
+        assert due_candidate(["2"], entries, self.NOW + 11) == "2"
+
+    def test_future_next_poll_at_skipped(self):
+        entries = {
+            "2": UsageEntry(fetched_at=self.NOW - 300, next_poll_at=self.NOW + 60),
+            "3": UsageEntry(fetched_at=self.NOW - 60),
+        }
+        # "2" is stalest but not yet due per auto's learned plan → "3" wins.
+        assert due_candidate(["2", "3"], entries, self.NOW) == "3"
+
+    def test_none_when_no_candidates(self):
+        assert due_candidate([], {}, self.NOW) is None

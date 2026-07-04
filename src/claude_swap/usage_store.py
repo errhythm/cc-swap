@@ -120,6 +120,42 @@ class UsageEntry:
         return None
 
 
+def due_candidate(
+    candidates: list[str], entries: dict[str, UsageEntry], now: float
+) -> str | None:
+    """The due candidate with the stalest data, or None.
+
+    Due = past its ``nextPollAt`` and not in failure backoff. Sentinel
+    accounts (api-key / no credentials) have nothing to fetch. A
+    perpetually failing account can't monopolize the slot: its backoff
+    removes it from the due set between attempts.
+
+    Shared by the auto engine and the TUI watch view so both pick the same
+    single alternate to poll per pass. Only auto *writes* poll plans
+    (``nextPollAt``/``pollIntervalS``); watch just respects them here.
+    """
+    due: list[tuple[int, float, str]] = []
+    for num in candidates:
+        entry = entries.get(num)
+        if entry is None:
+            due.append((0, 0.0, num))
+            continue
+        if entry.sentinel is not None:
+            continue
+        if entry.in_backoff(now):
+            continue
+        if entry.next_poll_at is not None and now < entry.next_poll_at:
+            continue
+        if entry.fetched_at is None:
+            due.append((0, 0.0, num))
+        else:
+            due.append((1, entry.fetched_at, num))
+    if not due:
+        return None
+    due.sort()
+    return due[0][2]
+
+
 def _failure_backoff_s(consecutive_failures: int, retry_after_s: float | None) -> float:
     computed = min(
         BACKOFF_BASE_S * (2 ** max(0, consecutive_failures - 1)), BACKOFF_CAP_S
