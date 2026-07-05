@@ -27,14 +27,12 @@ from typing import Callable
 
 from claude_swap import printer, usage_store
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.json_output import (
-    USAGE_API_KEY,
-    USAGE_KEYCHAIN_UNAVAILABLE,
-    USAGE_NO_CREDENTIALS,
-    USAGE_TOKEN_EXPIRED,
-)
 from claude_swap.models import AccountsSnapshot
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.switcher import (
+    SENTINEL_NOTES,
+    ClaudeAccountSwitcher,
+    last_seen_note,
+)
 
 
 class SnapshotSource:
@@ -158,16 +156,9 @@ def run_action(fn: Callable[[], dict | None]) -> ActionResult:
 # Display helpers
 # ---------------------------------------------------------------------------
 
-SENTINEL_LABELS = {
-    USAGE_API_KEY: "API key account — no subscription quota",
-    USAGE_TOKEN_EXPIRED: "token expired — log in with this account, then re-add",
-    USAGE_KEYCHAIN_UNAVAILABLE: "keychain unavailable",
-    USAGE_NO_CREDENTIALS: "no stored credentials",
-}
-
-
 def sentinel_label(sentinel: str) -> str:
-    return SENTINEL_LABELS.get(sentinel, sentinel)
+    """The same wording ``cswap list`` prints for this sentinel state."""
+    return SENTINEL_NOTES.get(sentinel, sentinel)
 
 
 def window_pct(last_good: dict | None, key: str) -> float | None:
@@ -240,6 +231,7 @@ __all__ = [
     "SnapshotSource",
     "format_age",
     "format_duration",
+    "last_seen_note",
     "reset_text",
     "run_action",
     "sentinel_label",

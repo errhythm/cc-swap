@@ -150,6 +150,14 @@ def account_card_text(
         style = MUTED if sentinel == USAGE_API_KEY else SEV_WARN
         marker = "·" if sentinel == USAGE_API_KEY else "⚠"
         text.append(f"{marker} {data.sentinel_label(sentinel)}", style=style)
+        # Same supplementary line `cswap list` prints: the last good
+        # measurement behind the sentinel (API-key accounts have no quota to
+        # have "seen").
+        if sentinel != USAGE_API_KEY:
+            last_seen = data.last_seen_note(acc.usage)
+            if last_seen is not None:
+                text.append("\n    ")
+                text.append(f"└ {last_seen}", style=MUTED)
         return text
 
     rows = usage_rows(acc.usage.last_good, now)

@@ -212,6 +212,51 @@ class TestFormatting:
         assert tui_data.format_age(None) is None
         assert tui_data.format_age(120) == "· 2m ago"
 
+    def test_sentinel_labels_match_cswap_list(self):
+        # The TUI must describe sentinel states with the exact wording `cswap
+        # list` prints — owned-and-expired means Claude Code refreshes the
+        # active account, not that the user must re-login.
+        assert (
+            tui_data.sentinel_label(USAGE_TOKEN_EXPIRED)
+            == "token expired — Claude Code refreshes the active account"
+        )
+        from claude_swap.switcher import SENTINEL_NOTES
+
+        for sentinel, note in SENTINEL_NOTES.items():
+            assert tui_data.sentinel_label(sentinel) == note
+        assert tui_data.sentinel_label("unknown state") == "unknown state"
+
+    def test_sentinel_card_shows_last_seen_like_cswap_list(self):
+        # A sentinel is a live overlay — the entry can still carry the last
+        # good measurement, and `cswap list` prints it as a "last seen" line.
+        # The card must too (except for API-key accounts, which have no quota).
+        from claude_swap.tui.widgets import account_card_text
+
+        entry = UsageEntry(
+            sentinel=USAGE_TOKEN_EXPIRED,
+            last_good={"five_hour": {"pct": 53.0}},
+            fetched_at=time.time() - 720,
+            age_s=720.0,
+        )
+        card = account_card_text(make_account(1, active=True, entry=entry), 80).plain
+        assert "token expired — Claude Code refreshes the active account" in card
+        assert "last seen 53% used" in card
+
+        no_history = account_card_text(
+            make_account(1, entry=UsageEntry(sentinel=USAGE_TOKEN_EXPIRED)), 80
+        ).plain
+        assert "last seen" not in no_history
+
+        api_key = account_card_text(
+            make_account(
+                1,
+                kind="api_key",
+                entry=dataclasses.replace(entry, sentinel=USAGE_API_KEY),
+            ),
+            80,
+        ).plain
+        assert "last seen" not in api_key
+
     def test_window_helpers(self):
         entry = make_entry(pct5=47.0)
         assert tui_data.window_pct(entry.last_good, "five_hour") == 47.0

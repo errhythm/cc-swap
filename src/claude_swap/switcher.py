@@ -132,15 +132,22 @@ def _format_usage_lines(usage: dict) -> list[str]:
 
 
 # Human notes for sentinel usage states (fallback: the raw sentinel string).
-_SENTINEL_NOTES = {
+# Public: the TUI renders the same wording so both surfaces describe a state
+# identically (e.g. owned-and-expired means Claude Code will refresh, not that
+# the user must re-login).
+SENTINEL_NOTES = {
     USAGE_TOKEN_EXPIRED: "token expired — Claude Code refreshes the active account",
     USAGE_API_KEY: "API key (no quota)",
     USAGE_KEYCHAIN_UNAVAILABLE: "keychain unavailable — locked or in use; try again",
 }
 
 
-def _last_seen_note(entry: UsageEntry) -> str | None:
-    """"last seen 53% used · 12m ago" from an entry's last-good measurement."""
+def last_seen_note(entry: UsageEntry) -> str | None:
+    """"last seen 53% used · 12m ago" from an entry's last-good measurement.
+
+    Public: the TUI renders the same note under sentinel states (see
+    ``SENTINEL_NOTES``), so both surfaces stay word-for-word identical.
+    """
     if entry.last_good is None or entry.fetched_at is None:
         return None
     headroom = oauth.account_headroom(entry.last_good)
@@ -162,8 +169,8 @@ def _usage_entry_lines(entry: UsageEntry) -> list[str]:
     error, so a failing endpoint is visible instead of a silent blank.
     """
     if entry.sentinel is not None:
-        out = [dimmed(_SENTINEL_NOTES.get(entry.sentinel, entry.sentinel))]
-        last_seen = _last_seen_note(entry)
+        out = [dimmed(SENTINEL_NOTES.get(entry.sentinel, entry.sentinel))]
+        last_seen = last_seen_note(entry)
         if last_seen is not None and entry.sentinel != USAGE_API_KEY:
             out.append(f"{dimmed('└')} {muted(last_seen)}")
         return out
