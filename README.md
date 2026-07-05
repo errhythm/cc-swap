@@ -124,6 +124,9 @@ Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), 
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
 
+<img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
+
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:
