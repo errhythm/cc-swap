@@ -170,7 +170,7 @@ The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working
 
 Session-mode profiles (`cswap run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` — cooldown and quarantined accounts; delete it to reset) live in the backup directory root.
 
-On Linux/WSL, set `XDG_DATA_HOME` to override the default location. Data from older installs under `~/.claude-swap-backup/` is migrated automatically on first run.
+On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 
 ## Advanced
 
