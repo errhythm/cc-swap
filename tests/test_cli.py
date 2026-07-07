@@ -76,21 +76,34 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "Multi-Account Switcher" in result.stdout
-        assert "--add-account" in result.stdout
-        assert "--switch" in result.stdout
-        assert "--list" in result.stdout
-        assert "--status" in result.stdout
+        # Bare subcommands are the documented interface and lead the help.
+        assert "cswap add" in result.stdout or "add " in result.stdout
+        assert "switch <num|email>" in result.stdout
+        assert "list " in result.stdout
+        assert "status " in result.stdout
+        # The legacy `--flag` spellings still work but are hidden from the
+        # options section; only the "keep working" note may mention them.
+        options_section = result.stdout.split("Flags combine with subcommands:")[0]
+        assert "--add-account" not in options_section
+        assert "--switch " not in options_section
+        assert "--list" not in options_section
+        assert "--status" not in options_section
+        # ...and the note that they keep working is still present.
+        assert "keep working" in result.stdout
 
     def test_no_args_shows_error(self):
-        """Test that running without args shows error."""
+        """Test that running without args (non-TTY) shows a clean no-command error."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_swap"],
             capture_output=True,
             text=True,
             env=_subprocess_env(),
         )
-        assert result.returncode != 0
-        assert "required" in result.stderr.lower() or "error" in result.stderr.lower()
+        assert result.returncode == 2
+        assert "no command given" in result.stderr
+        # The now-hidden legacy flags must not leak into the error.
+        assert "--add-account" not in result.stderr
+        assert "one of the arguments" not in result.stderr
 
     def test_mutually_exclusive_args(self):
         """Test that mutually exclusive args are enforced."""
@@ -121,7 +134,7 @@ class TestCLI:
                 cli.main()
 
         assert excinfo.value.code == 2
-        assert "--token-status can only be used with --list" in capsys.readouterr().err
+        assert "--token-status can only be used with 'list'" in capsys.readouterr().err
 
     def test_token_status_flag_is_forwarded_to_list(self):
         """--list --token-status should call list_accounts(show_token_status=True)."""
@@ -143,7 +156,7 @@ class TestCLI:
                 cli.main()
 
         assert excinfo.value.code == 2
-        assert "--strategy can only be used with --switch" in capsys.readouterr().err
+        assert "--strategy can only be used with bare 'switch'" in capsys.readouterr().err
 
     def test_strategy_next_available_requires_switch(self, capsys):
         """--strategy next-available should only be accepted alongside --switch."""
@@ -152,7 +165,7 @@ class TestCLI:
                 cli.main()
 
         assert excinfo.value.code == 2
-        assert "--strategy can only be used with --switch" in capsys.readouterr().err
+        assert "--strategy can only be used with bare 'switch'" in capsys.readouterr().err
 
     def test_strategy_rejects_unknown_value(self, capsys):
         """argparse rejects strategies outside the known choices."""
@@ -193,7 +206,7 @@ class TestCLI:
                 cli.main()
 
         assert excinfo.value.code == 2
-        assert "--slot can only be used with --add-account or --add-token" in capsys.readouterr().err
+        assert "--slot can only be used with 'add' or 'add-token'" in capsys.readouterr().err
 
     def test_slot_flag_in_help(self):
         """--slot should appear in help output."""
@@ -213,7 +226,7 @@ class TestCLI:
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
         assert excinfo.value.code == 2
-        assert "--account can only be used with --export" in capsys.readouterr().err
+        assert "--account can only be used with 'export'" in capsys.readouterr().err
 
     def test_force_flag_requires_import_or_switch_to(self, capsys):
         """--force should only be accepted alongside --import or --switch-to."""
@@ -222,7 +235,7 @@ class TestCLI:
                 cli.main()
         assert excinfo.value.code == 2
         assert (
-            "--force can only be used with --import or --switch-to"
+            "--force can only be used with 'import' or 'switch <num|email>'"
             in capsys.readouterr().err
         )
 
@@ -270,15 +283,15 @@ class TestCLI:
         assert "not allowed" in result.stderr.lower()
 
     def test_export_in_help(self):
-        """--export and --import should appear in help output."""
+        """The export/import subcommands should appear in help output."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_swap", "--help"],
             capture_output=True,
             text=True,
             env=_subprocess_env(),
         )
-        assert "--export" in result.stdout
-        assert "--import" in result.stdout
+        assert "export <path>" in result.stdout
+        assert "import <path>" in result.stdout
 
     def test_export_dispatch_calls_transfer(self):
         """--export dispatches into transfer.export_accounts."""
@@ -300,7 +313,7 @@ class TestCLI:
             with pytest.raises(SystemExit) as exc_info:
                 cli.main()
         assert exc_info.value.code == 2
-        assert "--full can only be used with --export" in capsys.readouterr().err
+        assert "--full can only be used with 'export'" in capsys.readouterr().err
 
     def test_full_flag_dispatches_with_full_true(self):
         """--export --full should pass full=True into export_accounts."""
@@ -331,14 +344,14 @@ class TestCLI:
         )
 
     def test_upgrade_in_help(self):
-        """--upgrade should appear in help output."""
+        """The upgrade subcommand should appear in help output."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_swap", "--help"],
             capture_output=True,
             text=True,
             env=_subprocess_env(),
         )
-        assert "--upgrade" in result.stdout
+        assert "upgrade " in result.stdout
 
     def test_upgrade_dispatches_without_constructing_switcher(self):
         """--upgrade should call run_self_upgrade and skip switcher init."""
@@ -372,6 +385,31 @@ class TestCLI:
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr("claude_swap.menubar.run", _fake_run, raising=False)
         # geteuid only exists on POSIX; ensure non-root path
+        monkeypatch.setattr(cli.os, "geteuid", lambda: 1000, raising=False)
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        assert called.get("ran") is True
+
+    def test_menubar_subcommand_dispatches(self, monkeypatch):
+        """Bare `cswap menubar` should route exactly like `cswap --menubar`."""
+        called = {}
+
+        class _FakeSwitcher:
+            def __init__(self, *a, **k):
+                pass
+            def _is_running_in_container(self):
+                return False
+
+        def _fake_run(switcher):
+            called["ran"] = True
+            return 0
+
+        monkeypatch.setattr(cli, "ClaudeAccountSwitcher", _FakeSwitcher)
+        monkeypatch.setattr(sys, "argv", ["cswap", "menubar"])
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr("claude_swap.menubar.run", _fake_run, raising=False)
         monkeypatch.setattr(cli.os, "geteuid", lambda: 1000, raising=False)
 
         with pytest.raises(SystemExit) as exc:
@@ -426,7 +464,7 @@ class TestCLICommands:
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
         assert excinfo.value.code == 2
-        assert "--email can only be used with --add-token" in capsys.readouterr().err
+        assert "--email can only be used with 'add-token'" in capsys.readouterr().err
 
     def test_add_token_dispatches_to_switcher(self, temp_home: Path, capsys):
         """--add-token with --email should call add_account_from_token."""
@@ -461,15 +499,15 @@ class TestCLICommands:
         )
 
     def test_add_token_in_help(self):
-        """--add-token should appear in help output."""
+        """The add-token subcommand and the still-visible --email modifier appear."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_swap", "--help"],
             capture_output=True,
             text=True,
             env=_subprocess_env(),
         )
-        assert "--add-token" in result.stdout
-        assert "--email" in result.stdout
+        assert "add-token [TOKEN|-]" in result.stdout
+        assert "--email" in result.stdout  # modifier flag stays visible
 
 
 class TestRunCommand:
@@ -603,6 +641,7 @@ class TestSubcommandAliases:
         assert cli._translate_subcommand(["rm", "2"]) == ["--remove-account", "2"]
         assert cli._translate_subcommand(["upgrade"]) == ["--upgrade"]
         assert cli._translate_subcommand(["update"]) == ["--upgrade"]
+        assert cli._translate_subcommand(["menubar"]) == ["--menubar"]
 
     def test_translate_value_verbs_pass_through_extra_flags(self):
         assert cli._translate_subcommand(["export", "b.cswap", "--full"]) == [

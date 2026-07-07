@@ -189,7 +189,7 @@ Needs the `menubar` extra (macOS only):
 
 ```bash
 uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar]'
-cswap --menubar
+cswap menubar
 ```
 
 Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / remove / refresh actions. Enable *Settings → Auto-switch accounts* to run the same engine as [`cswap auto`](#automatic-switching) in the background; it shares the `autoswitch.*` settings, so the menu bar and CLI stay in sync. Off until you turn it on.

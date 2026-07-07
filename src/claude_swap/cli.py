@@ -54,6 +54,7 @@ _SUBCOMMAND_FLAGS = {
     "update": "--upgrade",
     "tui": "--tui",
     "watch": "--watch",
+    "menubar": "--menubar",
 }
 
 
@@ -89,8 +90,8 @@ def _run_command(argv: list[str]) -> None:
     """Handle `cswap run NUM|EMAIL [--no-share] [-- <claude args>]`.
 
     Pre-dispatched before the main parser is built: a positional subcommand
-    can't coexist with main()'s required mutually-exclusive flag group, and
-    this keeps the existing parser untouched. Limitation: `run` must be the
+    can't coexist with main()'s mutually-exclusive flag group, and this keeps
+    the existing parser untouched. Limitation: `run` must be the
     first argument (`cswap --debug run 2` is not supported; use
     `cswap run 2 --debug`).
 
@@ -529,9 +530,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog=_prog_name(),
-        description="Multi-Account Switcher for Claude Code",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        usage="%(prog)s <command> [args] [options]",
+        description="""Multi-Account Switcher for Claude Code
+
 Commands:
   %(prog)s help                       show this help
   %(prog)s list                       list managed accounts
@@ -548,12 +549,13 @@ Commands:
   %(prog)s import <path>              import accounts
   %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
   %(prog)s watch                      dashboard, opened on the live watch page
+  %(prog)s menubar                    macOS menu bar app
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
 
-Aliases: ls=list  rm=remove  update=upgrade
-
-Flags combine with subcommands:
+Aliases: ls=list  rm=remove  update=upgrade""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Flags combine with subcommands:
   %(prog)s switch --strategy best           # pick the account with most quota left
   %(prog)s switch --strategy next-available # rotate, skipping rate-limited accounts
   %(prog)s switch user@example.com
@@ -582,14 +584,14 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     parser.add_argument(
         "--token-status",
         action="store_true",
-        help="Show OAuth token expiry state (use with --list)",
+        help="Show OAuth token expiry state (use with 'list')",
     )
     parser.add_argument(
         "--json",
         action="store_true",
         help=(
-            "Emit machine-readable JSON to stdout (use with --list, --status, "
-            "--switch, or --switch-to). See README 'JSON output for scripting'."
+            "Emit machine-readable JSON to stdout (use with 'list', 'status', "
+            "or 'switch'). See README 'JSON output for scripting'."
         ),
     )
     parser.add_argument(
@@ -597,7 +599,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         choices=["best", "next-available"],
         metavar="{best,next-available}",
         help=(
-            "With --switch: pick the target by remaining 5h/7d quota. "
+            "With bare 'switch': pick the target by remaining 5h/7d quota. "
             "'best' jumps to the account with the most headroom; "
             "'next-available' rotates to the next account, skipping any at their limit"
         ),
@@ -606,13 +608,13 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         "--slot",
         type=int,
         metavar="NUM",
-        help="Specify slot number when adding account (use with --add-account or --add-token)",
+        help="Specify slot number when adding account (use with 'add' or 'add-token')",
     )
     parser.add_argument(
         "--email",
         metavar="EMAIL",
         help=(
-            "Email address for the account. Optional with --add-token; "
+            "Email address for the account. Optional with 'add-token'; "
             "defaults to setup-token-{slot}@token.local (or "
             "api-key-{slot}@token.local for API keys) since these tokens "
             "carry no real email metadata."
@@ -621,13 +623,13 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     parser.add_argument(
         "--account",
         metavar="NUM|EMAIL",
-        help="Limit export to one account (use with --export)",
+        help="Limit export to one account (use with 'export')",
     )
     parser.add_argument(
         "--force",
         action="store_true",
         help=(
-            "Overwrite existing accounts during import; with --switch-to, "
+            "Overwrite existing accounts during import; with 'switch <num|email>', "
             "activate the stored credentials without backing up the current "
             "login first"
         ),
@@ -638,100 +640,116 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help="Include full ~/.claude.json in export (default: oauthAccount only)",
     )
 
-    group = parser.add_mutually_exclusive_group(required=True)
+    # Legacy `--flag` interface. Still fully supported (bare subcommands rewrite
+    # into these, see _translate_subcommand), but hidden from --help so the
+    # subcommands shown in the description are the one documented interface.
+    # The group is not `required` because the "no command" case is handled
+    # explicitly below (a required group with every member suppressed prints a
+    # broken empty-list error).
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument(
         "--add-account",
         action="store_true",
-        help="Add current account to managed accounts",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--remove-account",
         metavar="NUM|EMAIL",
-        help="Remove account by number or email",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--list",
         action="store_true",
-        help="List all managed accounts",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--switch",
         action="store_true",
-        help="Rotate to next account in sequence",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--switch-to",
         metavar="NUM|EMAIL",
-        help="Switch to specific account number or email",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--status",
         action="store_true",
-        help="Show current account status",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--purge",
         action="store_true",
-        help="Remove all claude-swap data from the system",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--export",
         metavar="PATH",
-        help="Export accounts to file (use '-' for stdout)",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--import",
         dest="import_",
         metavar="PATH",
-        help="Import accounts from file (use '-' for stdin)",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--tui",
         action="store_true",
-        help=(
-            "Launch the interactive dashboard (usage bars, switching, live "
-            "auto view). Bare %(prog)s in a terminal opens it too."
-        ),
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--watch",
         action="store_true",
-        help=(
-            "Open the interactive dashboard directly on the watch page: "
-            "every account in full detail, live"
-        ),
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--menubar",
         action="store_true",
-        help="Launch the macOS menu bar app (macOS only)",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--upgrade",
         action="store_true",
-        help="Upgrade claude-swap to the latest version on PyPI",
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--add-token",
         metavar="TOKEN|-",
         nargs="?",
         const="",
-        help=(
-            "Register a raw OAuth setup-token or managed API key (sk-ant-api...) "
-            "as a new account; the type is auto-detected. Pass '-' to read from "
-            "stdin or omit the value to be prompted securely."
-        ),
+        help=argparse.SUPPRESS,
     )
 
     args = parser.parse_args(argv)
 
+    # No action selected: emit a clean, subcommand-oriented message rather than
+    # the raw argparse "one of the arguments ... is required" (which would list
+    # the now-hidden legacy flags). Value actions can be falsy-but-set
+    # (--add-token uses const=""), so test those with `is not None`.
+    if not (
+        args.add_account
+        or args.list
+        or args.switch
+        or args.status
+        or args.purge
+        or args.tui
+        or args.watch
+        or args.menubar
+        or args.upgrade
+        or args.remove_account is not None
+        or args.switch_to is not None
+        or args.export is not None
+        or args.import_ is not None
+        or args.add_token is not None
+    ):
+        parser.error("no command given — try '%(prog)s help'" % {"prog": _prog_name()})
+
     if args.token_status and not args.list:
-        parser.error("--token-status can only be used with --list")
+        parser.error("--token-status can only be used with 'list'")
 
     if args.json and not (args.list or args.status or args.switch or args.switch_to):
-        parser.error(
-            "--json can only be used with --list, --status, --switch, or --switch-to"
-        )
+        parser.error("--json can only be used with 'list', 'status', or 'switch'")
 
     if args.json and args.token_status:
         # Token status is not part of the JSON v1 schema; reject rather than
@@ -739,22 +757,22 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         parser.error("--token-status cannot be combined with --json")
 
     if args.strategy is not None and not args.switch:
-        parser.error("--strategy can only be used with --switch")
+        parser.error("--strategy can only be used with bare 'switch'")
 
     if args.slot is not None and not (args.add_account or args.add_token is not None):
-        parser.error("--slot can only be used with --add-account or --add-token")
+        parser.error("--slot can only be used with 'add' or 'add-token'")
 
     if args.email is not None and args.add_token is None:
-        parser.error("--email can only be used with --add-token")
+        parser.error("--email can only be used with 'add-token'")
 
     if args.account is not None and not args.export:
-        parser.error("--account can only be used with --export")
+        parser.error("--account can only be used with 'export'")
 
     if args.force and not (args.import_ or args.switch_to):
-        parser.error("--force can only be used with --import or --switch-to")
+        parser.error("--force can only be used with 'import' or 'switch <num|email>'")
 
     if args.full and not args.export:
-        parser.error("--full can only be used with --export")
+        parser.error("--full can only be used with 'export'")
 
     # Self-upgrade runs before switcher init so we don't touch config/keychain
     # just to upgrade the tool itself.
