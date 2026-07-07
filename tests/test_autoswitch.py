@@ -1172,3 +1172,26 @@ class TestModelAwareSwitch:
         })
         assert outcome is TickOutcome.SWITCHED
         assert h.active_number() == 2  # lowest binding (max of 5h, Fable)
+
+    def test_comma_separated_models_switch_on_any(self, temp_home):
+        # Configured for "Fable,Opus"; active #1 is fine on Fable but maxed on
+        # Opus → must leave. Candidate scoped windows carry both models.
+        h = self._seed(temp_home, model="Fable,Opus")
+
+        def usage(five_h, fable, opus):
+            return {
+                "five_hour": {"pct": five_h},
+                "seven_day": {"pct": 0.0},
+                "scoped": [
+                    {"name": "Fable", "pct": fable},
+                    {"name": "Opus", "pct": opus},
+                ],
+            }
+
+        outcome = h.tick_with_usage({
+            "1": usage(5, 20, 100),   # Opus maxed
+            "2": usage(5, 20, 30),    # most headroom
+            "3": usage(5, 20, 70),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2

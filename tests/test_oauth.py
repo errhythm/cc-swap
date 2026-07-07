@@ -87,6 +87,23 @@ class TestAccountHeadroom:
         usage = {"five_hour": {"pct": 10.0}, "scoped": [{"name": "Opus", "pct": 100.0}]}
         assert oauth.account_headroom(usage, ["Fable"]) == 90.0
 
+    def test_multiple_models_take_the_worst(self):
+        usage = {
+            "five_hour": {"pct": 10.0},
+            "scoped": [
+                {"name": "Fable", "pct": 30.0},
+                {"name": "Opus", "pct": 95.0},
+                {"name": "Haiku", "pct": 50.0},
+            ],
+        }
+        # Opus binds (95%); Sonnet is absent and simply contributes nothing.
+        assert oauth.account_headroom(usage, ["Fable", "Opus", "Sonnet"]) == 5.0
+
+    def test_works_for_any_model_name(self):
+        for name in ("Opus", "Sonnet", "Haiku"):
+            usage = {"scoped": [{"name": name, "pct": 100.0}]}
+            assert oauth.account_headroom(usage, [name]) == 0.0
+
     def test_only_scoped_and_named_yields_headroom(self):
         # No 5h/7d at all (the live shape when the API returns only limits).
         assert oauth.account_headroom({"scoped": [{"name": "Fable", "pct": 100.0}]}, ["Fable"]) == 0.0

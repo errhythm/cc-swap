@@ -47,10 +47,11 @@ class AutoSwitchSettings:
     strategy: str = "best"  # reserved for future strategies; only "best" in v1
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
-    # When set to a model display name (e.g. "Fable"), that model's per-model
-    # weekly limit is folded into the binding window, so the engine switches
-    # off an account whose model quota is exhausted even while its 5h/7d
-    # windows still have headroom. None = account-wide 5h/7d only (default).
+    # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus").
+    # Each named model's per-model weekly limit is folded into the binding
+    # window, so the engine switches off an account whose model quota is
+    # exhausted even while its 5h/7d windows still have headroom. None =
+    # account-wide 5h/7d only (default).
     model: str | None = None
 
 
@@ -116,7 +117,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "model", "model", "string",
-            help="Also switch when this model's weekly limit is hit (e.g. Fable)",
+            help="Also switch on these models' weekly limits (e.g. Fable or Fable,Opus)",
         ),
     )
 }

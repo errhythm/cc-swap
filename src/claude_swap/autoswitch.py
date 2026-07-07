@@ -398,10 +398,14 @@ class AutoSwitchEngine:
     ):
         self.switcher = switcher
         self.settings = settings
-        # Model whose per-model weekly limit also binds the switch decision
-        # (empty = account-wide 5h/7d only). Passed to every account_headroom
-        # call so active and candidates are judged on the same axes.
-        self._models = (settings.model,) if settings.model else ()
+        # Model(s) whose per-model weekly limit also binds the switch decision
+        # (empty = account-wide 5h/7d only). ``settings.model`` is a comma-
+        # separated list ("Fable", "Opus,Sonnet", ...); split once here and
+        # pass to every account_headroom call so active and candidates are
+        # judged on the same axes.
+        self._models = tuple(
+            m.strip() for m in (settings.model or "").split(",") if m.strip()
+        )
         self.on_event = on_event
         self.dry_run = dry_run
         self.state_path = state_path or (switcher.backup_dir / STATE_FILENAME)
