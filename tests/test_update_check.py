@@ -112,11 +112,11 @@ class TestDetectInstallMethod:
         monkeypatch.delenv("PIPX_HOME", raising=False)
 
     def test_uv_tool_default_path(self, monkeypatch):
-        self._set_prefix(monkeypatch, "/home/me/.local/share/uv/tools/claude-swap")
+        self._set_prefix(monkeypatch, "/home/me/.local/share/uv/tools/ccswap")
         assert _detect_install_method() == "uv"
 
     def test_pipx_default_path(self, monkeypatch):
-        self._set_prefix(monkeypatch, "/home/me/.local/pipx/venvs/claude-swap")
+        self._set_prefix(monkeypatch, "/home/me/.local/pipx/venvs/ccswap")
         assert _detect_install_method() == "pipx"
 
     def test_non_adjacent_uv_tools_does_not_match(self, monkeypatch):
@@ -129,17 +129,17 @@ class TestDetectInstallMethod:
         assert _detect_install_method() is None
 
     def test_source_checkout_returns_none(self, monkeypatch):
-        self._set_prefix(monkeypatch, "/home/me/code/claude-swap/.venv")
+        self._set_prefix(monkeypatch, "/home/me/code/ccswap/.venv")
         assert _detect_install_method() is None
 
     def test_mixed_case_path_detected(self, monkeypatch):
         # Lowercasing should make matching case-insensitive (e.g. Windows).
-        self._set_prefix(monkeypatch, "/Home/Me/.local/share/UV/Tools/claude-swap")
+        self._set_prefix(monkeypatch, "/Home/Me/.local/share/UV/Tools/ccswap")
         assert _detect_install_method() == "uv"
 
     def test_uv_tool_dir_env_with_prefix_under_it(self, monkeypatch, tmp_path):
         custom_root = tmp_path / "uv-tools"
-        prefix = custom_root / "claude-swap"
+        prefix = custom_root / "ccswap"
         monkeypatch.setattr("claude_swap.update_check.sys.prefix", str(prefix))
         monkeypatch.setenv("UV_TOOL_DIR", str(custom_root))
         monkeypatch.delenv("PIPX_HOME", raising=False)
@@ -157,7 +157,7 @@ class TestDetectInstallMethod:
 
     def test_pipx_home_env_with_prefix_under_it(self, monkeypatch, tmp_path):
         custom_root = tmp_path / "pipx-home"
-        prefix = custom_root / "venvs" / "claude-swap"
+        prefix = custom_root / "venvs" / "ccswap"
         monkeypatch.setattr("claude_swap.update_check.sys.prefix", str(prefix))
         monkeypatch.setenv("PIPX_HOME", str(custom_root))
         monkeypatch.delenv("UV_TOOL_DIR", raising=False)
@@ -167,10 +167,10 @@ class TestDetectInstallMethod:
 class TestCheckForUpdateMessage:
     @patch("claude_swap.update_check.sys.platform", "linux")
     @patch("claude_swap.update_check.urllib.request.urlopen")
-    def test_detected_method_non_windows_suggests_cswap_upgrade(
+    def test_detected_method_non_windows_suggests_ccswap_upgrade(
         self, mock_urlopen, tmp_path, monkeypatch
     ):
-        # uv/pipx on macOS/Linux: cswap upgrade actually upgrades, so advertise it.
+        # uv/pipx on macOS/Linux: ccswap upgrade actually upgrades, so advertise it.
         monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
         monkeypatch.setattr("claude_swap.update_check._detect_install_method", lambda: "uv")
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
@@ -178,7 +178,7 @@ class TestCheckForUpdateMessage:
         result = check_for_update("0.3.2")
 
         assert result is not None
-        assert "cswap upgrade" in result
+        assert "ccswap upgrade" in result
         assert "uv tool upgrade" not in result
 
     @patch("claude_swap.update_check.sys.platform", "win32")
@@ -186,7 +186,7 @@ class TestCheckForUpdateMessage:
     def test_detected_method_windows_suggests_direct_command(
         self, mock_urlopen, tmp_path, monkeypatch
     ):
-        # Windows: cswap upgrade only prints, so point at the real command.
+        # Windows: ccswap upgrade only prints, so point at the real command.
         monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
         monkeypatch.setattr("claude_swap.update_check._detect_install_method", lambda: "pipx")
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
@@ -194,14 +194,14 @@ class TestCheckForUpdateMessage:
         result = check_for_update("0.3.2")
 
         assert result is not None
-        assert "pipx upgrade claude-swap" in result
-        assert "cswap upgrade" not in result
+        assert "pipx upgrade ccswap" in result
+        assert "ccswap upgrade" not in result
 
     @patch("claude_swap.update_check.urllib.request.urlopen")
-    def test_unknown_method_suggests_cswap_instructions(
+    def test_unknown_method_suggests_ccswap_instructions(
         self, mock_urlopen, tmp_path, monkeypatch
     ):
-        # Unknown install method: cswap upgrade can only show instructions.
+        # Unknown install method: ccswap upgrade can only show instructions.
         monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
         monkeypatch.setattr("claude_swap.update_check._detect_install_method", lambda: None)
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
@@ -209,7 +209,7 @@ class TestCheckForUpdateMessage:
         result = check_for_update("0.3.2")
 
         assert result is not None
-        assert "cswap upgrade` for upgrade instructions" in result
+        assert "ccswap upgrade` for upgrade instructions" in result
         assert "uv tool upgrade" not in result
         assert "pipx upgrade" not in result
 
@@ -223,7 +223,7 @@ class TestRunSelfUpgrade:
 
         assert run_self_upgrade() == 0
         mock_run.assert_called_once_with(
-            ["uv", "tool", "upgrade", "claude-swap"], check=False
+            ["uv", "tool", "upgrade", "ccswap"], check=False
         )
 
     @patch("claude_swap.update_check.subprocess.run")
@@ -233,7 +233,7 @@ class TestRunSelfUpgrade:
 
         assert run_self_upgrade() == 0
         mock_run.assert_called_once_with(
-            ["pipx", "upgrade", "claude-swap"], check=False
+            ["pipx", "upgrade", "ccswap"], check=False
         )
 
     @patch("claude_swap.update_check.subprocess.run")
@@ -251,9 +251,9 @@ class TestRunSelfUpgrade:
         assert run_self_upgrade() == 1
         mock_run.assert_not_called()
         err = capsys.readouterr().err
-        assert "uv tool upgrade claude-swap" in err
-        assert "pipx upgrade claude-swap" in err
-        assert "pip install --upgrade claude-swap" in err
+        assert "uv tool upgrade ccswap" in err
+        assert "pipx upgrade ccswap" in err
+        assert "pip install --upgrade ccswap" in err
 
     @patch(
         "claude_swap.update_check.subprocess.run", side_effect=FileNotFoundError
@@ -276,7 +276,7 @@ class TestRunSelfUpgradeWindows:
         assert run_self_upgrade() == 1
         mock_run.assert_not_called()
         out = capsys.readouterr().out
-        assert "uv tool upgrade claude-swap" in out
+        assert "uv tool upgrade ccswap" in out
 
     @patch("claude_swap.update_check.subprocess.run")
     @patch("claude_swap.update_check._detect_install_method", return_value="pipx")
@@ -284,7 +284,7 @@ class TestRunSelfUpgradeWindows:
         assert run_self_upgrade() == 1
         mock_run.assert_not_called()
         out = capsys.readouterr().out
-        assert "pipx upgrade claude-swap" in out
+        assert "pipx upgrade ccswap" in out
 
     @patch("claude_swap.update_check.subprocess.run")
     @patch("claude_swap.update_check._detect_install_method", return_value=None)
@@ -292,6 +292,6 @@ class TestRunSelfUpgradeWindows:
         assert run_self_upgrade() == 1
         mock_run.assert_not_called()
         err = capsys.readouterr().err
-        assert "uv tool upgrade claude-swap" in err
-        assert "pipx upgrade claude-swap" in err
-        assert "pip install --upgrade claude-swap" in err
+        assert "uv tool upgrade ccswap" in err
+        assert "pipx upgrade ccswap" in err
+        assert "pip install --upgrade ccswap" in err

@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 from rich.text import Text
-from textual.widgets import ListItem, Static
+from textual.widgets import ListItem, ListView, Static
 
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.models import AccountSnapshot
@@ -260,7 +260,8 @@ class AccountsPanel(Static):
             return Text(
                 "No managed accounts yet.\n"
                 "Use the menu below: Add account — from your current "
-                "Claude Code login, or from a setup-token / API key.",
+                f"{app.provider_label} login"
+                + (", or from a setup-token / API key." if app.provider == "claude" else "."),
                 style=MUTED,
             )
         now = time.time()
@@ -319,6 +320,29 @@ class AccountItem(ListItem):
         self.number = acc.number
         self.email = acc.email
         self.query_one(AccountCard).set_account(acc)
+
+
+class CyclingListView(ListView):
+    """A ListView whose cursor wraps at both ends."""
+
+    def action_cursor_up(self) -> None:
+        if not self.children:
+            return
+        if self.index is None or self.index <= 0:
+            self.index = len(self.children) - 1
+            return
+        super().action_cursor_up()
+
+    def action_cursor_down(self) -> None:
+        if not self.children:
+            return
+        if self.index is None:
+            self.index = 0
+            return
+        if self.index >= len(self.children) - 1:
+            self.index = 0
+            return
+        super().action_cursor_down()
 
 
 class MenuItem(ListItem):

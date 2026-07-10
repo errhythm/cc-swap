@@ -8,6 +8,7 @@ import os
 import sys
 
 from claude_swap import __version__
+from claude_swap.codex import CodexAccountSwitcher
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
 from claude_swap.printer import dimmed, error, force_utf8_output, muted
@@ -20,8 +21,8 @@ def _prog_name() -> str:
     argparse otherwise defaults to ``os.path.basename(sys.argv[0])``, which for
     an installed entry-point shim renders as an ugly absolute path (e.g.
     ``python.exe C:\\Users\\me\\.local\\bin\\cswap``). We strip that down to the
-    bare command the user typed (``cswap`` / ``claude-swap``), falling back to
-    ``cswap`` for ``python -m claude_swap`` and odd launchers.
+    bare command the user typed (``ccswap`` / ``cswap``), falling back to
+    ``ccswap`` for ``python -m claude_swap`` and odd launchers.
     """
     name = os.path.basename(sys.argv[0] or "")
     for ext in (".exe", ".pyw", ".py"):
@@ -29,7 +30,7 @@ def _prog_name() -> str:
             name = name[: -len(ext)]
             break
     if not name or name in {"__main__", "python", "python3", "py"}:
-        return "cswap"
+        return "ccswap"
     return name
 
 
@@ -116,11 +117,11 @@ def _run_command(argv: list[str]) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  cswap run 2
-  cswap run user@example.com
-  cswap run 2 --no-share
-  cswap run 2 --share-history
-  cswap run 2 -- --resume
+  ccswap run 2
+  ccswap run user@example.com
+  ccswap run 2 --no-share
+  ccswap run 2 --share-history
+  ccswap run 2 -- --resume
         """,
     )
     parser.add_argument(
@@ -180,6 +181,107 @@ Examples:
         sys.exit(130)
 
 
+def _codex_command(argv: list[str]) -> None:
+    """Handle ``cswap codex`` account management commands."""
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog_name()} codex",
+        description=(
+            "Manage file-backed Codex CLI accounts. Run 'codex login' for an "
+            "account, then use 'ccswap codex add' to save it."
+        ),
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    subcommands = parser.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("list", "List managed Codex accounts"),
+        ("status", "Show active Codex account"),
+        ("usage", "Fetch Codex subscription usage and diagnostic errors"),
+    ):
+        command = subcommands.add_parser(name, help=help_text)
+        command.add_argument("--json", action="store_true")
+    add = subcommands.add_parser("add", help="Save the current Codex login")
+    add.add_argument("--slot", type=int, metavar="N")
+    switch = subcommands.add_parser("switch", help="Switch to the next or named Codex account")
+    switch.add_argument("account", nargs="?", metavar="NUM|EMAIL")
+    switch.add_argument("--json", action="store_true")
+    remove = subcommands.add_parser("remove", help="Remove a saved Codex account")
+    remove.add_argument("account", metavar="NUM|EMAIL")
+    remove.add_argument("--yes", action="store_true", help="Skip confirmation")
+    auto = subcommands.add_parser(
+        "auto",
+        help="Switch Codex accounts when the active quota nears its limit",
+        description=(
+            "Watch Codex subscription usage and select a better saved account. "
+            "A running Codex session must be restarted after a switch."
+        ),
+    )
+    auto.add_argument("--once", action="store_true", help="Evaluate once and exit")
+    auto.add_argument("--json", action="store_true", help="Emit JSONL events")
+    auto.add_argument("--interval", type=float, metavar="SECONDS")
+    auto.add_argument("--threshold", type=float, metavar="PCT")
+    auto.add_argument("--cooldown", type=float, metavar="SECONDS")
+    auto.add_argument("--dry-run", action="store_true", help="Report decisions without switching")
+    args = parser.parse_args(argv)
+
+    try:
+        switcher = CodexAccountSwitcher(debug=args.debug)
+        if args.action == "list":
+            switcher.list_accounts(json_output=args.json)
+        elif args.action == "status":
+            switcher.status(json_output=args.json)
+        elif args.action == "usage":
+            switcher.usage_status(json_output=args.json)
+        elif args.action == "add":
+            switcher.add_account(slot=args.slot)
+        elif args.action == "remove":
+            switcher.remove_account(args.account, assume_yes=args.yes)
+        elif args.action == "auto":
+            import signal
+            import time as _time
+
+            from claude_swap.codex_autoswitch import CodexAutoSwitchEngine
+            from claude_swap.printer import accent, yellowed
+            from claude_swap.settings import load_settings, merged_with_cli
+
+            def emit(event) -> None:
+                if args.json:
+                    print(json.dumps(event.to_json()), flush=True)
+                    return
+                stamp = _time.strftime("%H:%M:%S")
+                line = event.human()
+                if event.kind == "switch":
+                    line = accent(line)
+                elif event.kind == "error":
+                    line = yellowed(line)
+                else:
+                    line = dimmed(line)
+                print(f"{stamp}  {line}", flush=True)
+
+            settings = merged_with_cli(load_settings(switcher.backup_dir), args)
+            engine = CodexAutoSwitchEngine(
+                switcher, settings, emit, dry_run=args.dry_run
+            )
+            if args.once:
+                sys.exit(engine.tick().value)
+            if not args.json:
+                print(
+                    dimmed(
+                        f"Codex auto-switch running: threshold {settings.threshold:.0f}%, "
+                        f"every {settings.interval_seconds:.0f}s"
+                        f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
+                    )
+                )
+            signal.signal(signal.SIGTERM, lambda *_: engine.stop())
+            sys.exit(engine.run_loop())
+        elif args.account:
+            switcher.switch_to(args.account, json_output=args.json)
+        else:
+            switcher.switch(json_output=args.json)
+    except ClaudeSwitchError as exc:
+        error(f"Error: {exc}")
+        sys.exit(1)
+
+
 def _auto_command(argv: list[str]) -> None:
     """Handle `cswap auto [--once] [--json] [...]`.
 
@@ -194,7 +296,7 @@ def _auto_command(argv: list[str]) -> None:
     import time as _time
 
     parser = argparse.ArgumentParser(
-        prog="cswap auto",
+        prog="ccswap auto",
         description=(
             "Automatically switch accounts when the active one nears its "
             "5h/7d rate limit. Runs a foreground polling loop; use --once "
@@ -209,11 +311,11 @@ Exit codes with --once:
   3  blocked: wanted to switch but no viable target / all exhausted
 
 Examples:
-  cswap auto                       # foreground loop, switch at 90%% used
-  cswap auto --threshold 80        # switch earlier
-  cswap auto --json                # one JSON event per line (for scripts)
-  cswap auto --once; echo $?       # single tick, outcome in exit code
-  cswap auto --dry-run             # log decisions, never actually switch
+  ccswap auto                       # foreground loop, switch at 90%% used
+  ccswap auto --threshold 80        # switch earlier
+  ccswap auto --json                # one JSON event per line (for scripts)
+  ccswap auto --once; echo $?       # single tick, outcome in exit code
+  ccswap auto --dry-run             # log decisions, never actually switch
 
 Defaults live in settings.json in the backup root; flags override them.
         """,
@@ -355,9 +457,9 @@ def _config_command(argv: list[str]) -> None:
         for spec in SETTING_SPECS.values()
     )
     parser = argparse.ArgumentParser(
-        prog="cswap config",
+        prog="ccswap config",
         description=(
-            "Read and edit claude-swap settings (settings.json in the "
+            "Read and edit ccswap settings (settings.json in the "
             "backup root)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -511,6 +613,9 @@ def main() -> None:
     if argv and argv[0] == "run":
         _run_command(argv[1:])
         return  # only reachable in tests where exec/exit is mocked
+    if argv and argv[0] == "codex":
+        _codex_command(argv[1:])
+        return
     if argv and argv[0] == "auto":
         _auto_command(argv[1:])
         return  # only reachable in tests where sys.exit is mocked
@@ -532,7 +637,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog=_prog_name(),
         usage="%(prog)s <command> [args] [options]",
-        description="""Multi-Account Switcher for Claude Code
+        description="""Multi-Account Switcher for Claude Code and Codex
 
 Commands:
   %(prog)s help                       show this help
@@ -544,6 +649,7 @@ Commands:
   %(prog)s add-token [TOKEN|-]        register a setup-token or API key
   %(prog)s remove <num|email>         remove an account
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
+  %(prog)s codex <command>            manage Codex CLI accounts
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
@@ -552,7 +658,7 @@ Commands:
   %(prog)s watch                      dashboard, opened on the live watch page
   %(prog)s menubar                    macOS menu bar app
   %(prog)s upgrade                    self-upgrade to latest
-  %(prog)s purge                      remove all claude-swap data
+  %(prog)s purge                      remove all ccswap data
 
 Aliases: ls=list  rm=remove  update=upgrade""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -566,6 +672,7 @@ Aliases: ls=list  rm=remove  update=upgrade""",
   %(prog)s run 2 -- --resume                 # forward args after '--' to claude
   %(prog)s auto --once                       # single auto-switch tick (cron-friendly)
   %(prog)s config set autoswitch.threshold 80
+  %(prog)s codex switch 2                    # switch the file-backed Codex login
 
 The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep working.
         """,
@@ -852,7 +959,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             except ImportError:
                 error(
                     "Menu bar mode requires 'rumps'. "
-                    "Install with: pip install 'claude-swap[menubar]'"
+                    "Install with: pip install 'ccswap[menubar]'"
                 )
                 sys.exit(1)
             sys.exit(menubar_run(switcher))

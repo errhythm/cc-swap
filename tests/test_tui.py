@@ -470,6 +470,7 @@ class TestDashboard:
                 "auto",
                 "add-menu",
                 "remove-menu",
+                "provider-menu",
                 "quit",
             ]
             # nest into Add (index 3), then back out with escape
@@ -497,6 +498,23 @@ class TestDashboard:
             ids = [item.action_id for item in menu.query(MenuItem)]
             assert ids[0] == "switch"
 
+    async def test_provider_menu_swaps_the_dashboard_source(self, tmp_path):
+        claude = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        codex = FakeSwitcher(
+            [make_account(7, active=True, email="codex@example.com")], tmp_path
+        )
+        app = make_app(claude)
+        app._codex_switcher = codex
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "provider-menu")
+            await menu_select(pilot, "provider:codex")
+            await settle(pilot)
+
+            assert app.provider == "codex"
+            assert app.snapshot is not None
+            assert app.snapshot.accounts[0].email == "codex@example.com"
+
     async def test_vim_keys_move_menu_cursor(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
         app = make_app(fake)
@@ -509,6 +527,25 @@ class TestDashboard:
             await pilot.press("j")
             assert menu.index == 1
             await pilot.press("k")
+            assert menu.index == 0
+
+    async def test_menu_cursor_wraps_in_both_directions(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            from textual.widgets import ListView
+
+            menu = app.screen.query_one("#menu", ListView)
+            last = len(menu.children) - 1
+            assert menu.index == 0
+            await pilot.press("up")
+            assert menu.index == last
+            await pilot.press("down")
+            assert menu.index == 0
+            await pilot.press("k")
+            assert menu.index == last
+            await pilot.press("j")
             assert menu.index == 0
 
     async def test_s_opens_switch_screen_and_enter_switches(self, tmp_path):
@@ -768,6 +805,7 @@ class _FakeEngine:
     instances: list["_FakeEngine"] = []
 
     def __init__(self, switcher, settings, on_event, *, dry_run=False, **kwargs):
+        self.switcher = switcher
         self.settings = settings
         self.on_event = on_event
         self.dry_run = dry_run
@@ -790,6 +828,9 @@ def fake_engine(monkeypatch):
     _FakeEngine.instances = []
     monkeypatch.setattr(
         "claude_swap.tui.autoview.AutoSwitchEngine", _FakeEngine
+    )
+    monkeypatch.setattr(
+        "claude_swap.tui.autoview.CodexAutoSwitchEngine", _FakeEngine
     )
     return _FakeEngine
 
@@ -819,6 +860,26 @@ class TestAutoScreen:
             from textual.widgets import RichLog
 
             assert len(app.screen.query_one("#event-log", RichLog).lines) > 0
+
+    async def test_codex_provider_opens_its_auto_switch_engine(
+        self, tmp_path, fake_engine
+    ):
+        claude = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        codex = FakeSwitcher([make_account(7, active=True)], tmp_path)
+        app = make_app(claude)
+        app._codex_switcher = codex
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "provider-menu")
+            await menu_select(pilot, "provider:codex")
+            await settle(pilot)
+            await menu_select(pilot, "auto")
+            await pilot.pause()
+
+            from claude_swap.tui.autoview import AutoScreen
+
+            assert isinstance(app.screen, AutoScreen)
+            assert fake_engine.instances[-1].switcher is codex
 
     async def test_go_live_requires_confirmation(self, tmp_path, fake_engine):
         fake = FakeSwitcher(
