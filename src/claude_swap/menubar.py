@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from claude_swap.exceptions import ClaudeSwitchError, CredentialReadError
@@ -139,6 +139,35 @@ def _live_countdown(window: dict | str | None, now: float) -> str | None:
     return f"{minutes}m"
 
 
+_WEEKLY_PERIOD_S = 7 * 86400  # weekly limits reset on a fixed 7-day cadence
+
+
+def _rolled_weekly_window(window: dict | None, now: float) -> dict | None:
+    """A weekly window with a passed reset advanced to its next 7-day boundary.
+
+    Weekly limits reset on a fixed weekly cadence, so once the stored
+    ``resets_at`` is in the past we know the window rolled over — the stored pct
+    belongs to a window that no longer exists. Return a copy reflecting the reset
+    state (``pct`` 0, ``resets_at`` advanced to the next future boundary) so the
+    menu bar shows the reset from the static schedule alone, without waiting to
+    spend tokens on a fresh fetch. Missing/future/unparseable windows are
+    returned unchanged.
+    """
+    if not isinstance(window, dict):
+        return window
+    ts = _resets_at_ts(window)
+    if ts == float("inf") or ts > now:
+        return window
+    missed = int((now - ts) // _WEEKLY_PERIOD_S) + 1
+    new_ts = ts + missed * _WEEKLY_PERIOD_S
+    rolled = dict(window)
+    rolled["pct"] = 0.0
+    rolled["resets_at"] = datetime.fromtimestamp(new_ts, tz=timezone.utc).isoformat()
+    rolled.pop("countdown", None)  # recomputed live from the rolled resets_at
+    rolled.pop("clock", None)
+    return rolled
+
+
 def usage_summary(usage: dict | str | None, now: float | None = None) -> str:
     """One-line usage summary for an account row (reset countdown computed live)."""
     if isinstance(usage, str):
@@ -150,11 +179,24 @@ def usage_summary(usage: dict | str | None, now: float | None = None) -> str:
     parts: list[str] = []
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = usage.get(key)
+        if key == "seven_day":
+            window = _rolled_weekly_window(window, now)  # reflect a passed weekly reset
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
             seg = f"{label} {window['pct']:.0f}%"
             countdown = _live_countdown(window, now)
             if countdown:
                 seg += f" ({countdown})"  # time until this window resets
+            parts.append(seg)
+    # Per-model weekly limits (e.g. Fable), from the usage API's ``limits`` array.
+    for window in usage.get("scoped") or []:
+        window = _rolled_weekly_window(window, now)  # weekly cadence, same roll-forward
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
+            seg = f"{window['name']} {window['pct']:.0f}%"
+            if window["pct"] >= 100:
+                seg += " (!)"  # maxed model — the usual reason to switch
+            countdown = _live_countdown(window, now)
+            if countdown:
+                seg += f" ({countdown})"
             parts.append(seg)
     spend = usage.get("spend")
     if isinstance(spend, dict) and isinstance(spend.get("pct"), (int, float)):
@@ -181,10 +223,13 @@ def format_title(
     active_email: str | None,
     active_usage: dict | str | None,
     settings: MenuBarSettings,
+    now: float | None = None,
 ) -> str:
     """Build the menu-bar title from the active account and settings."""
     if active_email is None:
         return ICON
+    if now is None:
+        now = time.time()
     segments: list[str] = []
     if settings.show_account_name:
         segments.append(_local_part(active_email))
@@ -193,7 +238,9 @@ def format_title(
         if p is not None:
             segments.append(f"{p:.0f}%")
     if settings.title_pct in ("7d", "both"):
-        p = _window_pct(active_usage, "seven_day")
+        seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
+        seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
+        p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
         if p is not None:
             segments.append(f"{p:.0f}%")
     if not segments:
