@@ -1,9 +1,8 @@
-# ccswap
+# ccswap (Claude Codex Swap)
 
-**C**laude **C**odex **Swap** — multi-account and usage manager for Claude Code and OpenAI Codex. Save multiple logins, inspect their quota windows, switch manually or automatically before a rate limit, and manage both providers from one live dashboard.
+Multi-account and usage manager for Claude Code and OpenAI Codex. Save multiple logins, check their quota windows, switch manually or automatically before you hit a rate limit, and manage both providers from one dashboard.
 
-> [!NOTE]
-> `ccswap` is an independent fork of [claude-swap (`cswap`)](https://github.com/realiti4/claude-swap), originally created by Onur Cetinkol. This fork keeps the upstream MIT license and attribution while evolving as a separate product with first-class Codex support, the `ccswap` command, and its own release line.
+`ccswap` began as a fork of [claude-swap (`cswap`)](https://github.com/realiti4/claude-swap) by Onur Cetinkol, and still carries the original MIT license and credit for that. Since then it's grown into its own project: no more tracking upstream, no `cswap` compatibility, its own package and release line, and adds Codex support. It's MIT-licensed too, so fork it, file issues, send PRs — whatever's useful to you.
 
 ## Installation
 
