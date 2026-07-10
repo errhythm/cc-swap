@@ -1,6 +1,6 @@
 [project]
 name = "ccswap"
-version = "0.20.0"
+version = "0.20.2"
 description = "Claude Codex Swap — multi-account and usage manager for Claude Code and OpenAI Codex"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,8 +10,8 @@ dependencies = [
     "truststore>=0.10.4",
 ]
 authors = [
-    {name = "Onur Cetinkol", email = "onurcetinkol@gmail.com"},
     {name = "Ehsanur Rahman Rhythm", email = "errhythm.me@gmail.com"},
+    {name = "Onur Cetinkol", email = "onurcetinkol@gmail.com"},
 ]
 license = {text = "MIT"}
 keywords = ["claude", "claude-code", "codex", "openai", "account-switcher", "cli"]
@@ -37,6 +37,7 @@ menubar = ["rumps>=0.4.0"]
 Homepage = "https://github.com/errhythm/cc-swap"
 Repository = "https://github.com/errhythm/cc-swap"
 Issues = "https://github.com/errhythm/cc-swap/issues"
+PyPI = "https://pypi.org/project/ccswap/"
 Upstream = "https://github.com/realiti4/claude-swap"
 
 [project.scripts]
