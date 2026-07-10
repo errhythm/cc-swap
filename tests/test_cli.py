@@ -743,6 +743,22 @@ class TestSubcommandAliases:
             show_token_status=False, json_output=True,
         )
 
+    def test_codex_switch_subcommand_dispatches_to_codex_provider(self):
+        with patch("claude_swap.cli.CodexAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", "codex", "switch", "2", "--json"]):
+            cli.main()
+
+        switcher_cls.return_value.switch_to.assert_called_once_with(
+            "2", json_output=True
+        )
+
+    def test_codex_usage_subcommand_dispatches_to_codex_provider(self):
+        with patch("claude_swap.cli.CodexAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["ccswap", "codex", "usage", "--json"]):
+            cli.main()
+
+        switcher_cls.return_value.usage_status.assert_called_once_with(json_output=True)
+
     def test_run_subcommand_still_dispatches(self):
         """`cswap run 2` keeps reaching the session pre-dispatch (not translated)."""
         calls = []

@@ -3,6 +3,42 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
+name = "ccswap"
+version = "0.19.0"
+source = { editable = "." }
+dependencies = [
+    { name = "keyring" },
+    { name = "textual" },
+    { name = "truststore" },
+]
+
+[package.optional-dependencies]
+menubar = [
+    { name = "rumps" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "keyring", specifier = ">=25.0.0" },
+    { name = "rumps", marker = "extra == 'menubar'", specifier = ">=0.4.0" },
+    { name = "textual", specifier = ">=8.2.8,<9" },
+    { name = "truststore", specifier = ">=0.10.4" },
+]
+provides-extras = ["menubar"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+]
+
+[[package]]
 name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -37,42 +73,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/44/681604464ed9541673e486521497406fadcc15b5217c3e326b061696899a/cffi-2.0.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:28a3a209b96630bca57cce802da70c266eb08c6e97e5afd61a75611ee6c64592", size = 221584, upload-time = "2025-09-08T23:23:36.096Z" },
     { url = "https://files.pythonhosted.org/packages/25/8e/342a504ff018a2825d395d44d63a767dd8ebc927ebda557fecdaca3ac33a/cffi-2.0.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:7553fb2090d71822f02c629afe6042c299edf91ba1bf94951165613553984512", size = 224443, upload-time = "2025-09-08T23:23:37.328Z" },
     { url = "https://files.pythonhosted.org/packages/e1/5e/b666bacbbc60fbf415ba9988324a132c9a7a0448a9a8f125074671c0f2c3/cffi-2.0.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:6c6c373cfc5c83a975506110d17457138c8c63016b563cc9ed6e056a82f13ce4", size = 223437, upload-time = "2025-09-08T23:23:38.945Z" },
-]
-
-[[package]]
-name = "claude-swap"
-version = "0.21.0"
-source = { editable = "." }
-dependencies = [
-    { name = "keyring" },
-    { name = "textual" },
-    { name = "truststore" },
-]
-
-[package.optional-dependencies]
-menubar = [
-    { name = "rumps" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "keyring", specifier = ">=25.0.0" },
-    { name = "rumps", marker = "extra == 'menubar'", specifier = ">=0.4.0" },
-    { name = "textual", specifier = ">=8.2.8,<9" },
-    { name = "truststore", specifier = ">=0.10.4" },
-]
-provides-extras = ["menubar"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
 ]
 
 [[package]]

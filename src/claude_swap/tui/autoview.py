@@ -1,10 +1,10 @@
-"""Live auto-switch screen: the real engine, visualized.
+"""Live auto-switch screen: the active provider's engine, visualized.
 
 Runs :class:`AutoSwitchEngine` in a thread worker and renders its typed
 events. Opens in **dry-run** — opening a view must never start switching
 accounts on its own; going live is an explicit, confirmed action. The
-engine's own state file semantics (shared cooldown, quarantine list, state
-lock) make it safe to run alongside an external ``cswap auto``.
+engine's own state file semantics make it safe to run alongside an external
+``ccswap auto`` process.
 
 The active account's full card sits on top (same widget as the dashboard's
 panel, with the threshold tick); this screen adds the engine badge, the
@@ -30,6 +30,7 @@ from claude_swap.autoswitch import (
     binding_pct,
     pct_label,
 )
+from claude_swap.codex_autoswitch import CodexAutoSwitchEngine
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
 from claude_swap.tui import data
@@ -81,7 +82,7 @@ class AutoScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
-        self._engine: AutoSwitchEngine | None = None
+        self._engine: AutoSwitchEngine | CodexAutoSwitchEngine | None = None
         self._settings = None
         # Session-only threshold adjustment (t, then arrows). Never written
         # to settings.json — same memory-only precedent as the dry-run
@@ -203,7 +204,12 @@ class AutoScreen(Screen):
     # -- engine -------------------------------------------------------------
 
     def _start_engine(self, *, dry_run: bool) -> None:
-        engine = AutoSwitchEngine(
+        engine_type = (
+            AutoSwitchEngine
+            if self.app.provider == "claude"
+            else CodexAutoSwitchEngine
+        )
+        engine = engine_type(
             self.app.switcher,
             self._settings,
             self._emit_from_thread,
@@ -243,9 +249,9 @@ class AutoScreen(Screen):
         if self._engine.dry_run:
             self.app.push_screen(
                 ConfirmModal(
-                    "Go live? claude-swap will switch your active account "
+                    "Go live? ccswap will switch your active account "
                     "automatically when the threshold is reached.\n\n"
-                    "(Same behavior as running `cswap auto` in a terminal.)",
+                    "(Same behavior as the provider's `ccswap auto` command.)",
                     title="Go live",
                     yes_label="Go live",
                 ),
