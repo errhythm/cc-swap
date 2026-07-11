@@ -226,3 +226,110 @@ def test_snapshot_never_refreshes_the_active_codex_login(switcher, monkeypatch):
 
     assert snapshot.accounts[0].usage.last_good is None
     assert snapshot.accounts[0].usage.last_error == "expired"
+
+
+def _jwt_with_plan(email: str, account_id: str, plan: str) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "email": email,
+                "chatgpt_account_id": account_id,
+                "https://api.openai.com/auth": {"chatgpt_plan_type": plan},
+            }
+        ).encode()
+    ).decode().rstrip("=")
+    return f"eyJhbGciOiJub25lIn0.{payload}.signature"
+
+
+def _auth_with_plan(email: str, account_id: str, plan: str) -> dict:
+    auth = _auth(email, account_id)
+    auth["tokens"]["id_token"] = _jwt_with_plan(email, account_id, plan)
+    return auth
+
+
+@pytest.mark.parametrize(
+    "plan,expected",
+    [
+        ("team", "Codex Team"),
+        ("pro", "Codex Pro"),
+        ("plus", "Codex Plus"),
+        ("business", "Codex Business"),
+        ("enterprise", "Codex Enterprise"),
+        ("", "Codex"),
+        (None, "Codex"),
+        ("go_pro", "Codex Go Pro"),
+    ],
+)
+def test_codex_org_label_maps_plan_to_display(plan, expected):
+    assert codex.codex_org_label(plan) == expected
+
+
+def test_plan_type_read_from_token_and_falls_back_to_access_token():
+    assert codex._plan_type_from_auth(_auth_with_plan("a@b.co", "acct", "team")) == "team"
+    # id_token without a plan claim -> read the access_token namespace instead.
+    auth = _auth("a@b.co", "acct")
+    auth["tokens"]["access_token"] = _jwt_with_plan("a@b.co", "acct", "pro")
+    assert codex._plan_type_from_auth(auth) == "pro"
+    assert codex._plan_type_from_auth(_auth("a@b.co", "acct")) == ""
+
+
+def test_add_records_plan_and_list_shows_team_label(switcher):
+    instance, home = switcher
+    _write_live(home, _auth_with_plan("team@example.com", "acct-team", "team"))
+    instance.add_account(assume_yes=True)
+
+    stored = json.loads(instance.sequence_file.read_text())
+    assert stored["accounts"]["1"]["planType"] == "team"
+
+    listed = instance.list_accounts()["accounts"][0]
+    assert listed["planType"] == "team"
+    assert listed["label"] == "Codex Team"
+
+
+def test_list_derives_plan_for_accounts_saved_without_plan_type(switcher):
+    """Accounts stored before planType existed still show their plan."""
+    instance, home = switcher
+    _write_live(home, _auth_with_plan("team@example.com", "acct-team", "team"))
+    instance.add_account(assume_yes=True)
+
+    # Simulate a legacy backup: drop the recorded planType from the sequence.
+    data = json.loads(instance.sequence_file.read_text())
+    del data["accounts"]["1"]["planType"]
+    instance.sequence_file.write_text(json.dumps(data), encoding="utf-8")
+
+    listed = instance.list_accounts()["accounts"][0]
+    assert listed["planType"] == "team"
+    assert listed["label"] == "Codex Team"
+
+
+def test_snapshot_org_name_reflects_plan(switcher, monkeypatch):
+    instance, home = switcher
+    _write_live(home, _auth_with_plan("team@example.com", "acct-team", "team"))
+    instance.add_account(assume_yes=True)
+    monkeypatch.setattr(
+        codex, "fetch_codex_usage", lambda auth, *, base_url: {"five_hour": {"pct": 1}}
+    )
+
+    snapshot = instance.accounts_snapshot()
+
+    assert snapshot.accounts[0].org_name == "Codex Team"
+    assert snapshot.accounts[0].display_tag == "Codex Team"
+
+
+def test_usage_text_output_includes_reset_countdown(switcher, monkeypatch, capsys):
+    instance, home = switcher
+    _write_live(home, _auth_with_plan("team@example.com", "acct-team", "team"))
+    instance.add_account(assume_yes=True)
+    monkeypatch.setattr(
+        codex,
+        "fetch_codex_usage",
+        lambda auth, *, base_url: {
+            "five_hour": {"pct": 47, "resets_at": "2999-01-01T00:00:00Z"}
+        },
+    )
+
+    instance.usage_status()
+
+    out = capsys.readouterr().out
+    assert "47% used" in out
+    assert "resets in" in out

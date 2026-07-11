@@ -11,7 +11,7 @@ from claude_swap import __version__
 from claude_swap.codex import CodexAccountSwitcher
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
-from claude_swap.printer import dimmed, error, force_utf8_output, muted
+from claude_swap.printer import bolded, dimmed, error, force_utf8_output, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -280,6 +280,48 @@ def _codex_command(argv: list[str]) -> None:
     except ClaudeSwitchError as exc:
         error(f"Error: {exc}")
         sys.exit(1)
+
+
+def _list_dispatch(claude_switcher: "ClaudeAccountSwitcher", args) -> dict | None:
+    """Run ``list`` across providers, honoring ``--provider`` and ``--json``.
+
+    A single provider in ``--json`` mode returns that provider's bare payload,
+    so scripts on the old Claude-only ``list --json`` migrate by adding
+    ``--provider claude``. ``all`` (the default) nests both under
+    ``claude``/``codex`` keys. Human mode prints one section per provider and
+    never triggers Claude's interactive first-run inside the merged view.
+    """
+    provider = args.provider
+    if provider == "claude":
+        return claude_switcher.list_accounts(
+            show_token_status=args.token_status, json_output=args.json
+        )
+
+    codex_switcher = CodexAccountSwitcher(debug=args.debug)
+    if provider == "codex":
+        if args.json:
+            return codex_switcher.list_payload()
+        codex_switcher.list_accounts(json_output=False)
+        return None
+
+    # provider == "all": merge both providers.
+    if args.json:
+        claude_payload = claude_switcher.list_accounts(
+            show_token_status=args.token_status, json_output=True
+        )
+        return {"claude": claude_payload, "codex": codex_switcher.list_payload()}
+
+    print(bolded("Claude Code"))
+    if claude_switcher.sequence_file.exists():
+        claude_switcher.list_accounts(
+            show_token_status=args.token_status, json_output=False
+        )
+    else:
+        print(dimmed("  No Claude Code accounts."))
+    print()
+    print(bolded("Codex"))
+    codex_switcher.list_accounts(json_output=False)
+    return None
 
 
 def _auto_command(argv: list[str]) -> None:
@@ -703,6 +745,18 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         ),
     )
     parser.add_argument(
+        "--provider",
+        choices=["claude", "codex", "all"],
+        default="all",
+        metavar="{claude,codex,all}",
+        help=(
+            "Which provider 'list' covers. 'all' (default) merges Claude Code "
+            "and Codex; 'claude' or 'codex' restricts to one. In --json mode a "
+            "single provider emits that provider's bare payload; 'all' nests "
+            "both under 'claude'/'codex' keys."
+        ),
+    )
+    parser.add_argument(
         "--strategy",
         choices=["best", "next-available"],
         metavar="{best,next-available}",
@@ -856,6 +910,12 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     if args.token_status and not args.list:
         parser.error("--token-status can only be used with 'list'")
 
+    if args.provider != "all" and not args.list:
+        parser.error("--provider can only be used with 'list'")
+
+    if args.token_status and args.provider == "codex":
+        parser.error("--token-status applies to Claude Code, not '--provider codex'")
+
     if args.json and not (args.list or args.status or args.switch or args.switch_to):
         parser.error("--json can only be used with 'list', 'status', or 'switch'")
 
@@ -920,10 +980,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         elif args.remove_account:
             switcher.remove_account(args.remove_account)
         elif args.list:
-            payload = switcher.list_accounts(
-                show_token_status=args.token_status,
-                json_output=args.json,
-            )
+            payload = _list_dispatch(switcher, args)
         elif args.switch:
             payload = switcher.switch(strategy=args.strategy, json_output=args.json)
         elif args.switch_to:

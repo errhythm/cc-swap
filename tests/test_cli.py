@@ -756,10 +756,12 @@ class TestJsonOutputCli:
         assert excinfo.value.code == 2
         assert "--token-status cannot be combined with --json" in capsys.readouterr().err
 
-    def test_list_json_serialized_to_stdout(self, capsys):
+    def test_list_json_single_provider_emits_bare_payload(self, capsys):
+        """`list --provider claude --json` keeps the old Claude-only shape."""
         payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--list", "--json"]), \
+             patch.object(sys, "argv",
+                          ["claude-swap", "--list", "--provider", "claude", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
             switcher_cls.return_value.list_accounts.return_value = payload
@@ -770,6 +772,24 @@ class TestJsonOutputCli:
         )
         out = capsys.readouterr().out
         assert json.loads(out) == payload  # exactly one JSON object, no extra text
+
+    def test_list_json_merges_both_providers_by_default(self, capsys):
+        """`list --json` (no --provider) nests both providers under one object."""
+        claude_payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+        codex_payload = {"provider": "codex", "activeAccountNumber": None, "accounts": []}
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as claude_cls, \
+             patch("claude_swap.cli.CodexAccountSwitcher") as codex_cls, \
+             patch.object(sys, "argv", ["claude-swap", "--list", "--json"]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            claude_cls.return_value.list_accounts.return_value = claude_payload
+            codex_cls.return_value.list_payload.return_value = codex_payload
+            cli.main()
+
+        assert json.loads(capsys.readouterr().out) == {
+            "claude": claude_payload,
+            "codex": codex_payload,
+        }
 
     def test_switch_json_forwarded_and_serialized(self, capsys):
         payload = {"schemaVersion": 1, "switched": True}

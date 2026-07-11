@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -144,3 +145,34 @@ def get_running_instances(
     """Return all running Claude Code sessions and IDE instances."""
     resolved = claude_dir or get_claude_dir()
     return list_sessions(resolved), list_ide_instances(resolved)
+
+
+def is_codex_running() -> bool:
+    """Best-effort check for a live Codex CLI process.
+
+    Codex writes no PID or lock file we can trust for liveness, so this scans
+    the OS process table by executable name. It is only used to phrase the
+    post-switch reminder ("Codex is running, restart it" vs "ready on next
+    launch"); any failure returns ``False`` so detection never blocks a switch.
+    """
+    try:
+        if sys.platform == "win32":
+            completed = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq codex.exe", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return "codex.exe" in completed.stdout.lower()
+        # pgrep -x matches the executable name exactly, so it won't fire on
+        # ccswap itself or on unrelated paths that merely contain "codex".
+        completed = subprocess.run(
+            ["pgrep", "-x", "codex"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return completed.returncode == 0 and bool(completed.stdout.strip())
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Codex process detection failed: %s", exc)
+        return False
