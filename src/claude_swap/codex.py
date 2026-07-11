@@ -36,8 +36,24 @@ from claude_swap.exceptions import AccountNotFoundError, ConfigError, SwitchErro
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.locking import FileLock
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
+from claude_swap.oauth import format_reset
 from claude_swap.paths import get_backup_root
+from claude_swap.process_detection import is_codex_running
 from claude_swap.usage_store import SERVE_TTL_S, UsageEntry
+
+
+def _codex_restart_hint() -> str:
+    """Phrase the post-switch reminder based on whether Codex is live.
+
+    A running Codex holds the previous login in memory and never re-reads
+    ``auth.json``, so the swap only takes effect on its next launch.
+    """
+    if is_codex_running():
+        return (
+            "Codex is running — quit and relaunch it (or start a new session) "
+            "to use the selected account."
+        )
+    return "The selected account is ready and takes effect the next time you start Codex."
 
 
 def get_codex_home() -> Path:
@@ -70,6 +86,41 @@ def _decode_jwt_payload(token: object) -> dict[str, Any]:
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return {}
     return result if isinstance(result, dict) else {}
+
+
+def _plan_type_from_auth(auth: dict[str, Any]) -> str:
+    """Return the ChatGPT plan (``team``/``pro``/``plus``/...) for a login.
+
+    Codex stores no workspace name locally, only this plan claim inside the
+    signed tokens, so it is the closest label to Claude's org name that can be
+    derived without another network round-trip. Returns "" when unknown.
+    """
+    tokens = auth.get("tokens")
+    token_data = tokens if isinstance(tokens, dict) else {}
+    for key in ("id_token", "access_token"):
+        claims = _decode_jwt_payload(token_data.get(key))
+        namespace = claims.get("https://api.openai.com/auth")
+        if isinstance(namespace, dict):
+            plan = namespace.get("chatgpt_plan_type")
+            if isinstance(plan, str) and plan:
+                return plan
+    return ""
+
+
+def codex_org_label(plan_type: str | None) -> str:
+    """Map a ChatGPT plan to the account label shown in place of "Codex"."""
+    if not plan_type:
+        return "Codex"
+    known = {
+        "free": "Codex Free",
+        "plus": "Codex Plus",
+        "pro": "Codex Pro",
+        "team": "Codex Team",
+        "business": "Codex Business",
+        "enterprise": "Codex Enterprise",
+        "edu": "Codex Edu",
+    }
+    return known.get(plan_type.lower(), f"Codex {plan_type.replace('_', ' ').title()}")
 
 
 class CodexAccountSwitcher:
@@ -201,6 +252,24 @@ class CodexAccountSwitcher:
                 return "", "", mode
         return email, account_id, mode
 
+    def _account_plan(self, number: str, account: dict[str, Any], active: str | None) -> str:
+        """Plan type for one account: the stored value, else derived live.
+
+        Accounts saved before ``planType`` was recorded have no stored plan, so
+        fall back to decoding the token in the active auth.json (for the live
+        account) or the account's own backup. Keeps the label correct without
+        forcing a re-add.
+        """
+        stored = account.get("planType")
+        if isinstance(stored, str) and stored:
+            return stored
+        auth = (
+            self._read_json(self.auth_file)
+            if number == active
+            else self._read_account_auth(number)
+        )
+        return _plan_type_from_auth(auth) if auth is not None else ""
+
     def _credential_path(self, number: str) -> Path:
         return self.credentials_dir / f"account-{number}.json"
 
@@ -245,6 +314,7 @@ class CodexAccountSwitcher:
     def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
         live_auth = self._read_live_auth()
         email, account_id, mode = self._identity_from_auth(live_auth)
+        plan_type = _plan_type_from_auth(live_auth)
         with FileLock(self.lock_file):
             self._setup_directories()
             data = self._read_sequence()
@@ -270,6 +340,7 @@ class CodexAccountSwitcher:
                 "email": email,
                 "accountId": account_id,
                 "authMode": mode,
+                "planType": plan_type,
                 "added": _timestamp(),
             }
             data["activeAccountNumber"] = int(number)
@@ -342,7 +413,7 @@ class CodexAccountSwitcher:
         }
         if not json_output:
             print(f"Switched to Codex Account {number}: {target['email']}")
-            print("Restart Codex to apply the selected account.")
+            print(_codex_restart_hint())
         return result
 
     def switch(self, strategy: str | None = None, json_output: bool = False) -> dict[str, Any]:
@@ -359,32 +430,53 @@ class CodexAccountSwitcher:
         data = self._read_sequence()
         number = self.current_account_number()
         account = data["accounts"].get(number) if number else None
+        plan_type = self._account_plan(number, account, number) if account else ""
         payload = {
             "provider": "codex",
             "activeAccountNumber": int(number) if number else None,
             "email": account.get("email") if account else None,
+            "planType": plan_type,
+            "label": codex_org_label(plan_type),
         }
         if json_output:
             print(json.dumps(payload, indent=2))
         elif account:
-            print(f"Codex Account {number}: {account['email']} (active)")
+            tag = f" [{codex_org_label(plan_type)}]" if plan_type else ""
+            print(f"Codex Account {number}: {account['email']}{tag} (active)")
         else:
             print("No managed Codex account is currently active")
         return payload
 
-    def list_accounts(self, json_output: bool = False) -> dict[str, Any]:
+    def list_payload(self) -> dict[str, Any]:
+        """Build the Codex account listing without printing anything.
+
+        Lets the top-level ``ccswap list`` merge Codex into a combined payload
+        while ``list_accounts`` keeps rendering the standalone view.
+        """
         data = self._read_sequence()
         active = self.current_account_number()
-        accounts = [
-            {
-                "number": int(number),
-                "email": account.get("email", ""),
-                "authMode": account.get("authMode", "unknown"),
-                "active": number == active,
-            }
-            for number, account in sorted(data["accounts"].items(), key=lambda item: int(item[0]))
-        ]
-        payload = {"provider": "codex", "activeAccountNumber": int(active) if active else None, "accounts": accounts}
+        accounts = []
+        for number, account in sorted(data["accounts"].items(), key=lambda item: int(item[0])):
+            plan = self._account_plan(number, account, active)
+            accounts.append(
+                {
+                    "number": int(number),
+                    "email": account.get("email", ""),
+                    "authMode": account.get("authMode", "unknown"),
+                    "planType": plan,
+                    "label": codex_org_label(plan),
+                    "active": number == active,
+                }
+            )
+        return {
+            "provider": "codex",
+            "activeAccountNumber": int(active) if active else None,
+            "accounts": accounts,
+        }
+
+    def list_accounts(self, json_output: bool = False) -> dict[str, Any]:
+        payload = self.list_payload()
+        accounts = payload["accounts"]
         if json_output:
             print(json.dumps(payload, indent=2))
         elif not accounts:
@@ -392,7 +484,11 @@ class CodexAccountSwitcher:
         else:
             for account in accounts:
                 marker = " ● active" if account["active"] else ""
-                print(f"{account['number']:>2}  {account['email']}  [{account['authMode']}]{marker}")
+                # Prefer the plan label (e.g. "Codex Team"); fall back to the
+                # auth mode for API-key logins or backups added before planType
+                # was recorded.
+                tag = account["label"] if account["planType"] else f"Codex ({account['authMode']})"
+                print(f"{account['number']:>2}  {account['email']}  [{tag}]{marker}")
         return payload
 
     def usage_status(self, json_output: bool = False) -> dict[str, Any]:
@@ -425,7 +521,12 @@ class CodexAccountSwitcher:
                 for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
                     window = account["usage"].get(key)
                     if isinstance(window, dict):
-                        print(f"  {label}: {window.get('pct', 0):.0f}% used")
+                        line = f"  {label}: {window.get('pct', 0):.0f}% used"
+                        resets_at = window.get("resets_at")
+                        if isinstance(resets_at, str) and resets_at:
+                            countdown, clock = format_reset(resets_at)
+                            line += f" · resets in {countdown} ({clock})"
+                        print(line)
             else:
                 print(f"  usage unavailable: {account['error'] or 'no data returned'}")
         return payload
@@ -437,19 +538,25 @@ class CodexAccountSwitcher:
         eligible = set(data["accounts"]) if fetch is None else fetch
         live_auth = self._read_json(self.auth_file) if active else None
         entries: dict[str, UsageEntry] = {}
+        plans: dict[str, str] = {}
 
-        for number in data["accounts"]:
+        for number, account in data["accounts"].items():
             auth = live_auth if number == active and live_auth is not None else self._read_account_auth(number)
             entry = self._usage_entry(
                 number, auth, number in eligible, now, is_active=number == active
             )
             entries[number] = entry
+            # Prefer the live token's plan; fall back to what was stored at add
+            # time so a missing/unreadable backup still shows its last label.
+            plans[number] = (
+                _plan_type_from_auth(auth) if auth is not None else ""
+            ) or account.get("planType", "")
 
         accounts = tuple(
             AccountSnapshot(
                 number=number,
                 email=account.get("email", ""),
-                org_name="Codex",
+                org_name=codex_org_label(plans.get(number, "")),
                 org_uuid=account.get("accountId", ""),
                 is_active=number == active,
                 kind="api_key" if account.get("authMode") == "api_key" else "oauth",

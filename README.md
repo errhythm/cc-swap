@@ -175,15 +175,15 @@ ccswap codex add
 codex login
 ccswap codex add
 
-ccswap codex list
-ccswap codex usage                # fetch 5h/7d windows; prints diagnostic errors
+ccswap codex list                 # accounts tagged by plan, e.g. [Codex Team]
+ccswap codex usage                # 5h/7d windows with reset countdowns; diagnostic errors
 ccswap codex switch 1
 ccswap codex switch                 # rotate to the next saved account
 ccswap codex auto --once            # switch when active quota reaches the threshold
 ccswap codex remove 2
 ```
 
-Codex switching preserves the rest of `CODEX_HOME` (configuration, skills, sessions, and history) and replaces only `auth.json`. Restart Codex after switching so its running process loads the selected login. For ChatGPT-backed file logins, the dashboard reads the same read-only Codex rate-limit endpoint used by Codex and shows its primary (5h) and secondary (7d) windows. API-key accounts have no ChatGPT subscription quota, so they remain status-only. `ccswap codex auto` uses the same threshold, cooldown, `--once`, `--dry-run`, and JSON event controls as Claude auto-switching; it prepares the account for the next Codex launch and reports when a restart is needed.
+Codex switching preserves the rest of `CODEX_HOME` (configuration, skills, sessions, and history) and replaces only `auth.json`. Restart Codex after switching so its running process loads the selected login. For ChatGPT-backed file logins, the dashboard reads the same read-only Codex rate-limit endpoint used by Codex and shows its primary (5h) and secondary (7d) windows with live reset countdowns. Each account is labelled by its ChatGPT plan (`Codex Team`, `Codex Pro`, `Codex Plus`, …) — read from the login token, the closest local equivalent to Claude Code's org name, since Codex stores no workspace name on disk. API-key accounts have no ChatGPT subscription quota, so they remain status-only. `ccswap codex auto` uses the same threshold, cooldown, `--once`, `--dry-run`, and JSON event controls as Claude auto-switching; it prepares the account for the next Codex launch and reports when a restart is needed.
 
 Codex must use its documented file credential store. If your `~/.codex/config.toml` says `cli_auth_credentials_store = "keyring"`, change it to `"file"`, run `codex login`, then add the account. This deliberate restriction avoids writing a guessed OS-keyring entry.
 
@@ -206,7 +206,8 @@ ccswap auto                      # Auto-switch when nearing rate limits (see abo
 ccswap codex list                # List saved Codex CLI accounts
 ccswap codex switch 2            # Switch the file-backed Codex login
 ccswap config                    # Show or edit settings (see Configuration below)
-ccswap list                      # Show all accounts with 5h/7d usage and reset times
+ccswap list                      # Claude + Codex accounts with 5h/7d usage and reset times
+ccswap list --provider codex     # Restrict to one provider (claude|codex|all)
 ccswap status                    # Show current account
 ccswap add --slot 3              # Add account to a specific slot (prompts before overwrite)
 ccswap add --alias dev           # Add account and give it a short alias
@@ -226,7 +227,8 @@ The legacy `cswap` command remains available as a compatibility alias; use `ccsw
 
 ## Tips
 
-- **Do you need to restart after switching?** Usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message — no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
+- **Do you need to restart after switching?** For **Claude Code**, usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message — no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
+- **Codex always needs a restart.** Unlike Claude Code, the Codex CLI reads `auth.json` once when it starts and keeps the login in memory — it never re-reads the file or caches it on a timer. A running Codex session therefore keeps using the old account no matter what you swap underneath it. `ccswap codex switch` and `ccswap codex auto` write the selected login and tailor the reminder to your machine: if a Codex process is running they tell you to quit and relaunch it (or start a new session / reload the IDE extension); if none is running they confirm the account is ready for the next launch. This is a limitation of the Codex CLI, not ccswap — there is no flag, signal, or config setting that makes a live Codex reload credentials, and ccswap deliberately does not kill your running Codex process for you.
 - **Continuing sessions after switching:** You can keep using the same Claude Code session after switching — run `ccswap switch` in any terminal and carry on. If you'd prefer a clean start, close and reopen Claude Code (or the VS Code extension tab) and use `--resume` to pick your previous session. Either way, the first message on the new account may use extra usage as its conversation cache rebuilds.
 
 ## How it works
@@ -310,28 +312,46 @@ If an imported account is the one you're currently logged in as, activate the im
 Add `--json` to `list`, `status`, or `switch` to emit a single machine-readable JSON object on stdout (human-readable notices go to stderr). Useful for scripting auto-swap and quota tracking.
 
 ```bash
-ccswap list --json                   # all accounts with usage/quota
+ccswap list --json                   # BOTH providers, merged (default)
+ccswap list --provider claude --json # Claude Code accounts only (bare payload)
+ccswap list --provider codex --json  # Codex accounts only (bare payload)
 ccswap status --json                 # current active account
 ccswap switch --strategy best --json # switch, then report the result
 ccswap switch 2 --json
 ```
 
+`ccswap list` now covers both providers by default. In `--json` mode that means the output is keyed by provider (`claude`/`codex`); pass `--provider claude` (or `codex`) to get a single provider's **bare** payload — the same shape older scripts already parse.
+
 <details>
 <summary>Example output & schema notes</summary>
 
+Merged (default) — `ccswap list --json`:
+
 ```json
 {
-  "schemaVersion": 1,
-  "activeAccountNumber": 2,
-  "accounts": [
-    { "number": 2, "email": "you@example.com", "active": true, "usageStatus": "ok",
-      "usage": { "fiveHour": { "pct": 25.0, "resetsAt": "2026-06-22T23:29:59Z" },
-                 "sevenDay": { "pct": 16.0, "resetsAt": "2026-06-26T17:59:59Z" } } }
-  ]
+  "claude": {
+    "schemaVersion": 1,
+    "activeAccountNumber": 2,
+    "accounts": [
+      { "number": 2, "email": "you@example.com", "active": true, "usageStatus": "ok",
+        "usage": { "fiveHour": { "pct": 25.0, "resetsAt": "2026-06-22T23:29:59Z" },
+                   "sevenDay": { "pct": 16.0, "resetsAt": "2026-06-26T17:59:59Z" } } }
+    ]
+  },
+  "codex": {
+    "provider": "codex",
+    "activeAccountNumber": 1,
+    "accounts": [
+      { "number": 1, "email": "you@example.com", "authMode": "chatgpt",
+        "planType": "team", "label": "Codex Team", "active": true }
+    ]
+  }
 }
 ```
 
-Every payload carries a `schemaVersion` (currently `1`); on a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code. `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
+Single provider — `ccswap list --provider claude --json` — returns just the inner Claude object above (`schemaVersion`, `activeAccountNumber`, `accounts`), unchanged from before. **Migration:** scripts that parsed the old top-level `accounts` from `ccswap list --json` should switch to `ccswap list --provider claude --json`.
+
+Every Claude payload carries a `schemaVersion` (currently `1`); on a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code. `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
 
 Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is. An account held out of rotation with `cswap disable` carries an additive `"disabled": true` on its row (absent otherwise).
 

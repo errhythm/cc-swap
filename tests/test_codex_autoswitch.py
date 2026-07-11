@@ -47,7 +47,10 @@ class FakeCodexSwitcher:
         }
 
 
-def test_switches_to_the_healthiest_candidate_and_records_restart_warning(tmp_path):
+def test_switches_to_the_healthiest_candidate_and_records_restart_warning(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("claude_swap.codex.is_codex_running", lambda: True)
     switcher = FakeCodexSwitcher(
         tmp_path, (_account("1", 95, active=True), _account("2", 20))
     )
@@ -63,7 +66,26 @@ def test_switches_to_the_healthiest_candidate_and_records_restart_warning(tmp_pa
     assert switcher.switched_to == ["2"]
     switch = events[-1]
     assert switch.kind == "switch"
-    assert switch.warnings == ["Restart Codex to use the selected account."]
+    assert len(switch.warnings) == 1
+    assert "Codex is running" in switch.warnings[0]
+
+
+def test_records_next_launch_warning_when_codex_is_not_running(tmp_path, monkeypatch):
+    monkeypatch.setattr("claude_swap.codex.is_codex_running", lambda: False)
+    switcher = FakeCodexSwitcher(
+        tmp_path, (_account("1", 95, active=True), _account("2", 20))
+    )
+    events = []
+    engine = CodexAutoSwitchEngine(
+        switcher, AutoSwitchSettings(), events.append, clock=lambda: 1_000
+    )
+
+    outcome = engine.tick()
+
+    assert outcome is TickOutcome.SWITCHED
+    switch = events[-1]
+    assert len(switch.warnings) == 1
+    assert "next time you start Codex" in switch.warnings[0]
 
 
 def test_does_not_switch_while_active_account_is_below_threshold(tmp_path):

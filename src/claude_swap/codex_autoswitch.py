@@ -25,7 +25,7 @@ from claude_swap.autoswitch import (
     TickOutcome,
     binding_pct,
 )
-from claude_swap.codex import CodexAccountSwitcher
+from claude_swap.codex import CodexAccountSwitcher, _codex_restart_hint
 from claude_swap.locking import FileLock
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json
 
@@ -208,7 +208,7 @@ class CodexAutoSwitchEngine:
                     trigger=trigger,
                     from_ref=_ref(current, current_email),
                     to_ref=_ref(target, target_email),
-                    warnings=["Restart Codex to use the selected account."],
+                    warnings=[_codex_restart_hint()],
                     dry_run=True,
                 )
             )
@@ -233,7 +233,7 @@ class CodexAutoSwitchEngine:
                 trigger=trigger,
                 from_ref=result.get("from"),
                 to_ref=result.get("to"),
-                warnings=["Restart Codex to use the selected account."],
+                warnings=[_codex_restart_hint()],
             )
         )
         return TickOutcome.SWITCHED
