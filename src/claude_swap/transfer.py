@@ -77,12 +77,16 @@ def _validate_imported_account(switcher: ClaudeAccountSwitcher, account: dict) -
     # Org/uuid/added must be strings (or absent). A list/dict here would
     # otherwise blow up downstream (unhashable in seen_keys, broken composite
     # key matching, garbage in sequence.json).
-    for field in ("organizationUuid", "organizationName", "uuid", "added"):
+    for field in ("organizationUuid", "organizationName", "uuid", "added", "alias"):
         if field in account and account[field] is not None:
             if not isinstance(account[field], str):
                 raise TransferError(
                     f"{field} for {email} must be a string, got {type(account[field]).__name__}"
                 )
+
+    alias = account.get("alias")
+    if isinstance(alias, str) and not switcher._validate_alias(alias):
+        raise TransferError(f"invalid alias for {email}: {alias!r}")
 
     return email, str(raw_number)
 
@@ -220,6 +224,8 @@ def export_accounts(
         }
         if is_api_key:
             entry["kind"] = "api_key"
+        if record.get("alias"):
+            entry["alias"] = record["alias"]
         accounts_payload.append(entry)
 
     if not accounts_payload:
@@ -309,8 +315,15 @@ def import_accounts(
 
     # Pass 1: validate every account before any writes. A malformed account
     # later in the list must not leave earlier accounts half-imported.
+    local_data = switcher._get_sequence_data_migrated() or {}
+    local_aliases = {
+        (acc.get("alias") or "").lower()
+        for acc in local_data.get("accounts", {}).values()
+        if acc.get("alias")
+    }
     normalized: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
+    seen_aliases: set[str] = set()
     for raw in accounts:
         email, exported_num = _validate_imported_account(switcher, raw)
         org_uuid = raw.get("organizationUuid", "") or ""
@@ -339,6 +352,20 @@ def import_accounts(
                 f"duplicate account in export: {email} (org={org_uuid or 'personal'})"
             )
         seen_keys.add(key)
+
+        alias = raw.get("alias") or None
+        if alias:
+            alias_key = alias.lower()
+            if alias_key in seen_aliases:
+                raise TransferError(f"duplicate alias in export: {alias_key}")
+            seen_aliases.add(alias_key)
+            if alias_key in local_aliases:
+                _eprint(
+                    f"Warning: alias '{alias_key}' for {email} already used by an "
+                    "existing account — dropping the imported alias"
+                )
+                alias = None
+
         normalized.append(
             {
                 "email": email,
@@ -348,6 +375,7 @@ def import_accounts(
                 "uuid": raw.get("uuid", "") or "",
                 "added": raw.get("added") or get_timestamp(),
                 "kind": "api_key" if is_api_key else "oauth",
+                "alias": alias,
                 "creds_text": creds_text,
                 "config_text": json.dumps(config_obj, indent=2),
             }
@@ -440,6 +468,8 @@ def import_accounts(
         }
         if entry["kind"] == "api_key":
             new_record["kind"] = "api_key"
+        if entry.get("alias"):
+            new_record["alias"] = entry["alias"]
         data["accounts"][target_num] = new_record
         if int(target_num) not in data["sequence"]:
             data["sequence"].append(int(target_num))

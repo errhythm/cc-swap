@@ -50,6 +50,7 @@ def _seed_account(
     org_name: str = "",
     creds: dict | None = None,
     config: dict | None = None,
+    alias: str | None = None,
 ) -> None:
     """Write an account to backup + sequence.json."""
     creds_obj = creds if creds is not None else {**SAMPLE_CREDS, "_marker": email}
@@ -77,6 +78,8 @@ def _seed_account(
         "organizationName": org_name,
         "added": "2024-01-01T00:00:00Z",
     }
+    if alias:
+        data["accounts"][str(num)]["alias"] = alias
     if num not in data["sequence"]:
         data["sequence"].append(num)
         data["sequence"].sort()
@@ -156,6 +159,94 @@ class TestRoundTrip:
                 import_accounts(dst, str(out_file))
                 final = dst._get_sequence_data()
                 assert final["activeAccountNumber"] == 9  # untouched
+
+
+class TestAliasTransfer:
+    """Alias round-trips through export/import, and collisions are handled."""
+
+    def test_alias_round_trips(self, temp_home: Path):
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com", alias="dev")
+        _seed_account(src, 2, "bob@example.com")
+
+        out_file = temp_home / "backup.cswap"
+        export_accounts(src, str(out_file))
+        envelope = json.loads(out_file.read_text())
+        by_email = {a["email"]: a for a in envelope["accounts"]}
+        assert by_email["alice@example.com"]["alias"] == "dev"
+        assert "alias" not in by_email["bob@example.com"]
+
+        dst_home = temp_home.parent / "dst"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                import_accounts(dst, str(out_file))
+                seq = dst._get_sequence_data()
+                assert seq["accounts"]["1"]["alias"] == "dev"
+                assert "alias" not in seq["accounts"]["2"]
+
+    def test_import_alias_collision_with_local_drops_and_warns(self, temp_home: Path):
+        dst_home = temp_home.parent / "dst"
+        dst_home.mkdir()
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com", alias="dev")
+        out_file = temp_home / "backup.cswap"
+        export_accounts(src, str(out_file))
+
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                _seed_account(dst, 9, "existing@example.com", alias="dev")
+
+                import_accounts(dst, str(out_file))
+
+                seq = dst._get_sequence_data()
+                assert seq["accounts"]["9"]["alias"] == "dev"  # local kept
+                imported_num = next(
+                    n for n, acc in seq["accounts"].items()
+                    if acc["email"] == "alice@example.com"
+                )
+                assert "alias" not in seq["accounts"][imported_num]
+
+    def test_import_duplicate_alias_within_export_rejected(self, temp_home: Path):
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com", alias="dev")
+        _seed_account(src, 2, "bob@example.com", alias="dev")
+        out_file = temp_home / "backup.cswap"
+        export_accounts(src, str(out_file))
+        # Fabricate a duplicate alias in the exported envelope: export itself
+        # can't produce this (uniqueness enforced at set-time), but a
+        # hand-edited or foreign-tool-produced file could.
+        envelope = json.loads(out_file.read_text())
+        for acc in envelope["accounts"]:
+            acc["alias"] = "dev"
+        out_file.write_text(json.dumps(envelope))
+
+        dst_home = temp_home.parent / "dst"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                with pytest.raises(TransferError):
+                    import_accounts(dst, str(out_file))
+
+    def test_import_invalid_alias_format_rejected(self, temp_home: Path):
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com")
+        out_file = temp_home / "backup.cswap"
+        export_accounts(src, str(out_file))
+        envelope = json.loads(out_file.read_text())
+        envelope["accounts"][0]["alias"] = "123"  # purely numeric — invalid
+        out_file.write_text(json.dumps(envelope))
+
+        dst_home = temp_home.parent / "dst"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                with pytest.raises(TransferError):
+                    import_accounts(dst, str(out_file))
 
 
 # ---------------------------------------------------------------------------

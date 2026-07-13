@@ -108,6 +108,7 @@ class AccountSnapshot:
     kind: str  # "oauth" | "api_key"
     switchable: bool
     usage: UsageEntry
+    alias: str = ""
 
     @property
     def display_tag(self) -> str:

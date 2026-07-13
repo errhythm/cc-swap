@@ -121,6 +121,18 @@ class TestJsonHelpers:
             "error": {"type": "SwitchError", "message": "boom"},
         }
 
+    def test_account_row_includes_alias_when_set(self):
+        from claude_swap.json_output import account_row
+
+        row = account_row(1, "a@x.com", "", "", True, None, alias="dev")
+        assert row["alias"] == "dev"
+
+    def test_account_row_omits_alias_when_unset(self):
+        from claude_swap.json_output import account_row
+
+        row = account_row(1, "a@x.com", "", "", True, None)
+        assert "alias" not in row
+
 
 # --------------------------------------------------------------------------- #
 # --list --json
@@ -170,6 +182,28 @@ class TestListJson:
         assert acct1["active"] is True
         assert acct1["usageStatus"] == "ok"
         assert acct1["usage"]["fiveHour"]["resetsAt"] == "2026-01-01T00:00:00Z"
+
+    def test_list_payload_includes_alias(
+        self, temp_home: Path, mock_claude_config: Path,
+        sample_sequence_data: dict,
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        sample_sequence_data["accounts"]["1"]["alias"] = "dev"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with patch.object(switcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(active_creds, False)), \
+             patch.object(switcher, "_read_account_credentials", return_value=""), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
+            payload = switcher.list_accounts(json_output=True)
+
+        by_num = {a["number"]: a for a in payload["accounts"]}
+        assert by_num[1]["alias"] == "dev"
+        assert "alias" not in by_num[2]
 
     def test_usage_status_no_credentials_and_unavailable(
         self, temp_home: Path, mock_claude_config: Path,
@@ -289,6 +323,25 @@ class TestStatusJson:
         assert active["usageStatus"] == "ok"
         assert active["usage"]["fiveHour"]["resetsAt"] == "2026-01-01T00:00:00Z"
         assert payload["totalManagedAccounts"] == 2
+
+    def test_status_managed_includes_alias(
+        self, temp_home: Path, mock_claude_config: Path,
+        sample_sequence_data: dict,
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        sample_sequence_data["accounts"]["1"]["alias"] = "dev"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with patch.object(switcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(active_creds, False)), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
+            payload = switcher.status(json_output=True)
+
+        assert payload["active"]["alias"] == "dev"
 
 
 # --------------------------------------------------------------------------- #

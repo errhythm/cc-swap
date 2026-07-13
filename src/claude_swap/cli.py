@@ -330,6 +330,71 @@ def _unmap_command(argv: list[str]) -> None:
         sys.exit(130)
 
 
+def _alias_command(argv: list[str]) -> None:
+    """Handle `cswap alias [NUM|EMAIL] [NAME] [--unset]`.
+
+    With no arguments, lists all aliases. Otherwise sets (or, with --unset,
+    removes) the alias for the given account. Pre-dispatched before the main
+    parser for the same reason as `map` (the main parser's required
+    mutually-exclusive group can't hold a positional subcommand).
+    """
+    parser = argparse.ArgumentParser(
+        prog="cswap alias",
+        description=(
+            "Set, remove, or list a short display alias for an account. "
+            "Once set, the alias can be used anywhere an account number or "
+            "email is accepted (switch, remove, run, map)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap alias 2 dev
+  cswap alias user@example.com dev
+  cswap alias 2 --unset
+  cswap alias                         # list all aliases
+        """,
+    )
+    parser.add_argument(
+        "account",
+        nargs="?",
+        metavar="NUM|EMAIL",
+        help="Account to alias (number or email). Omit to list aliases.",
+    )
+    parser.add_argument(
+        "alias_name",
+        nargs="?",
+        metavar="NAME",
+        help="Alias to set (letters, digits, ., -, _; not purely numeric).",
+    )
+    parser.add_argument("--unset", action="store_true", help="Remove the account's alias")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    if args.unset and args.alias_name:
+        parser.error("--unset does not take a NAME argument")
+    if args.account is not None and not args.unset and not args.alias_name:
+        parser.error("NAME is required (or pass --unset to remove the alias)")
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        _guard_root(switcher)
+
+        if args.account is None:
+            switcher.list_aliases()
+            return
+
+        if args.unset:
+            switcher.alias(args.account, unset=True)
+        else:
+            switcher.alias(args.account, args.alias_name)
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
 def _auto_command(argv: list[str]) -> None:
     """Handle `cswap auto [--once] [--json] [...]`.
 
@@ -684,6 +749,9 @@ def main() -> None:
     if argv and argv[0] == "unmap":
         _unmap_command(argv[1:])
         return
+    if argv and argv[0] == "alias":
+        _alias_command(argv[1:])
+        return
 
     # Bare `cswap` in an interactive terminal opens the TUI dashboard (like
     # lazygit/k9s). TTY-gated on both ends so scripts and pipes keep getting
@@ -715,6 +783,9 @@ Commands:
   %(prog)s map <num|email> [path]     map a directory to an account
   %(prog)s map                        list directory mappings
   %(prog)s unmap [path]               remove a directory mapping
+  %(prog)s alias <num|email> <name>   set a short alias for an account
+  %(prog)s alias <num|email> --unset  remove an account's alias
+  %(prog)s alias                      list all aliases
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s export <path>              export accounts
@@ -805,6 +876,11 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         "--account",
         metavar="NUM|EMAIL",
         help="Limit export to one account (use with 'export')",
+    )
+    parser.add_argument(
+        "--alias",
+        metavar="NAME",
+        help="Set a short display alias for the account (use with 'add')",
     )
     parser.add_argument(
         "--force",
@@ -957,6 +1033,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     if args.account is not None and not args.export:
         parser.error("--account can only be used with 'export'")
 
+    if args.alias is not None and not args.add_account:
+        parser.error("--alias can only be used with 'add'")
+
     if args.force and not (args.import_ or args.switch_to):
         parser.error("--force can only be used with 'import' or 'switch <num|email>'")
 
@@ -991,7 +1070,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 sys.exit(1)
 
         if args.add_account:
-            switcher.add_account(slot=args.slot)
+            switcher.add_account(slot=args.slot, alias=args.alias)
         elif args.add_token is not None:
             switcher.add_account_from_token(
                 token=args.add_token,

@@ -158,6 +158,8 @@ def account_card_text(
     text = Text()
     text.append(f"{acc.number:>2}  ", style=f"bold {FOREGROUND}")
     text.append(acc.email, style=FOREGROUND)
+    if acc.alias:
+        text.append(f"  ({acc.alias})", style=MUTED)
     text.append(f"  [{acc.display_tag}]", style=MUTED)
     if acc.is_active:
         text.append("   ● active", style=f"bold {ACCENT}")
@@ -224,6 +226,8 @@ def mini_account_text(acc: AccountSnapshot, now: float) -> Text:
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{acc.number:>2}  ", style=f"bold {MUTED}")
     text.append(acc.email, style=FOREGROUND)
+    if acc.alias:
+        text.append(f"  ({acc.alias})", style=MUTED)
     text.append(f"  [{acc.display_tag}]", style=MUTED)
     text.append("   ")
 

@@ -1143,6 +1143,129 @@ class TestMapCommand:
         assert "root" in capsys.readouterr().err
 
 
+class TestAliasCommand:
+    """`cswap alias` — set/unset/list a short display alias for an account."""
+
+    def _seeded_switcher_env(self, temp_home):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"] = {
+            "email": "work@co.com",
+            "uuid": "u2",
+            "organizationUuid": "",
+            "organizationName": "",
+            "added": "2024-01-01T00:00:00Z",
+        }
+        data["sequence"] = [2]
+        switcher._write_json(switcher.sequence_file, data)
+        return switcher
+
+    def test_set_alias_by_number(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command(["2", "dev"])
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert data["accounts"]["2"]["alias"] == "dev"
+        assert "dev" in capsys.readouterr().out
+
+    def test_set_alias_by_email(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command(["work@co.com", "dev"])
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert data["accounts"]["2"]["alias"] == "dev"
+
+    def test_unset_alias(self, temp_home, capsys):
+        switcher = self._seeded_switcher_env(temp_home)
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"]["alias"] = "dev"
+        switcher._write_json(switcher.sequence_file, data)
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command(["2", "--unset"])
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert "alias" not in data["accounts"]["2"]
+
+    def test_list_aliases(self, temp_home, capsys):
+        switcher = self._seeded_switcher_env(temp_home)
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"]["alias"] = "dev"
+        switcher._write_json(switcher.sequence_file, data)
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command([])
+
+        out = capsys.readouterr().out
+        assert "dev" in out
+
+    def test_missing_name_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit):
+                cli._alias_command(["2"])
+
+    def test_unset_with_name_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit):
+                cli._alias_command(["2", "dev", "--unset"])
+
+    def test_invalid_alias_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as exc:
+                cli._alias_command(["2", "123"])
+        assert exc.value.code == 1
+        assert "Error" in capsys.readouterr().err
+
+    def test_unknown_account_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as exc:
+                cli._alias_command(["999", "dev"])
+        assert exc.value.code == 1
+
+    def test_dispatched_from_main(self, temp_home):
+        with patch("claude_swap.cli._alias_command") as alias_fn, \
+             patch.object(sys, "argv", ["claude-swap", "alias", "2", "dev"]):
+            cli.main()
+        alias_fn.assert_called_once_with(["2", "dev"])
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="root guard is POSIX-only")
+    def test_alias_refuses_root(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=0, create=True), \
+             patch.object(ClaudeAccountSwitcher, "_is_running_in_container", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                cli._alias_command(["2", "dev"])
+        assert exc.value.code == 1
+        assert "root" in capsys.readouterr().err
+
+    def test_add_with_alias_flag(self, temp_home, mock_claude_config, capsys):
+        fake_creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        with patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(ClaudeAccountSwitcher, "_read_credentials", return_value=fake_creds), \
+             patch.object(ClaudeAccountSwitcher, "_write_account_credentials"), \
+             patch.object(sys, "argv", ["claude-swap", "add", "--alias", "dev"]):
+            cli.main()
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert data["accounts"]["1"]["alias"] == "dev"
+
+    def test_alias_flag_without_add_errors(self, temp_home, capsys):
+        with patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "list", "--alias", "dev"]):
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+        assert exc.value.code == 2
+        assert "--alias can only be used with 'add'" in capsys.readouterr().err
+
+
 class TestRunAutoResolve:
     """`cswap run` with no account resolves the cwd's directory mapping."""
 
