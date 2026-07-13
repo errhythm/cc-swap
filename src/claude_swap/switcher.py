@@ -51,6 +51,7 @@ from claude_swap.models import (
     Platform,
     SwitchTransaction,
     get_timestamp,
+    normalize_alias,
 )
 from claude_swap.printer import (
     abbreviate_path,
@@ -323,19 +324,6 @@ class ClaudeAccountSwitcher:
         pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         return bool(re.match(pattern, email))
 
-    def _validate_alias(self, alias: str) -> bool:
-        """Validate alias format: letters/digits/-/_/. only, not purely digits.
-
-        Must not start with '-': argparse treats a leading-hyphen positional
-        as an option, so such an alias could never be passed back in on the
-        command line once set.
-        """
-        if not re.match(r"^[A-Za-z0-9._-]+$", alias):
-            return False
-        if alias.startswith("-"):
-            return False
-        return not alias.isdigit()
-
     def _setup_directories(self) -> None:
         """Create backup directories with proper permissions."""
         for directory in [self.backup_dir, self.configs_dir, self.credentials_dir]:
@@ -574,18 +562,52 @@ class ClaudeAccountSwitcher:
             record.get("organizationUuid", "") or "",
         )
 
-    def alias(self, identifier: str, alias: str | None = None, *, unset: bool = False) -> None:
-        """Set or unset the display alias for an account.
+    def set_alias(self, identifier: str, alias: str) -> tuple[str, str]:
+        """Set (or rename) the alias for the account matching identifier.
 
-        Args:
-            identifier: NUM|ALIAS|EMAIL identifying the account.
-            alias: New alias to set. Required unless ``unset`` is True.
-            unset: When True, remove the account's existing alias instead.
+        ``identifier`` is a slot number, email, or existing alias (so a
+        typo'd alias can be corrected with ``cswap alias <old> <new>`` as
+        well as by number/email). Returns ``(account_num, normalized_alias)``.
 
         Raises:
             AccountNotFoundError: identifier doesn't match any account.
             ValidationError: alias format is invalid.
-            ConfigError: alias is already used by another account.
+            ConfigError: the normalized alias is already used by another account.
+        """
+        try:
+            normalized = normalize_alias(alias)
+        except ValueError as e:
+            raise ValidationError(str(e)) from e
+
+        self._get_sequence_data_migrated()
+        account_num = self._resolve_account_identifier(identifier)
+        if not account_num:
+            raise AccountNotFoundError(
+                f"No account found with identifier: {identifier}"
+            )
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(account_num)
+        if not record:
+            raise AccountNotFoundError(f"Account-{account_num} does not exist")
+
+        conflict = self._alias_in_use(normalized, exclude_num=account_num)
+        if conflict is not None:
+            raise ConfigError(f"Alias '{normalized}' is already used by account {conflict}")
+
+        record["alias"] = normalized
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+        return account_num, normalized
+
+    def unset_alias(self, identifier: str) -> str:
+        """Clear the alias for the account matching identifier.
+
+        Returns the account number. Idempotent: clearing an already-unset
+        alias succeeds silently (no error), matching ``cswap config unset``'s
+        posture of "the end state is what you asked for".
+
+        Raises:
+            AccountNotFoundError: identifier doesn't match any account.
         """
         self._get_sequence_data_migrated()
         account_num = self._resolve_account_identifier(identifier)
@@ -598,33 +620,14 @@ class ClaudeAccountSwitcher:
         if not record:
             raise AccountNotFoundError(f"Account-{account_num} does not exist")
 
-        if unset:
-            if "alias" in record:
-                del record["alias"]
-                data["lastUpdated"] = get_timestamp()
-                self._write_json(self.sequence_file, data)
-            print(f"{accent('Removed alias')} for Account {account_num} ({record.get('email', '')})")
-            return
+        if "alias" in record:
+            del record["alias"]
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
+        return account_num
 
-        if not alias:
-            raise ValidationError("Alias name is required (use --unset to remove one)")
-        if not self._validate_alias(alias):
-            raise ValidationError(f"Invalid alias: {alias}")
-        normalized = alias.lower()
-        conflict = self._alias_in_use(normalized, exclude_num=account_num)
-        if conflict is not None:
-            raise ConfigError(f"Alias '{normalized}' is already used by account {conflict}")
-
-        record["alias"] = normalized
-        data["lastUpdated"] = get_timestamp()
-        self._write_json(self.sequence_file, data)
-        print(
-            f"{accent('Set alias')} '{normalized}' for Account {account_num} "
-            f"({record.get('email', '')})"
-        )
-
-    def list_aliases(self) -> None:
-        """Print all accounts that currently have an alias set."""
+    def list_aliases(self) -> list[tuple[str, str, str]]:
+        """Every set alias as ``(account_num, alias, email)``, slot-number order."""
         data = self._get_sequence_data_migrated()
         accounts = (data or {}).get("accounts", {})
         rows = [
@@ -632,11 +635,7 @@ class ClaudeAccountSwitcher:
             for num, acc in accounts.items()
             if acc.get("alias")
         ]
-        if not rows:
-            print(dimmed("No aliases set"))
-            return
-        for num, alias_name, email in sorted(rows, key=lambda r: int(r[0])):
-            print(f"  {num}: {alias_name} {muted(f'({email})')}")
+        return sorted(rows, key=lambda r: int(r[0]))
 
     def slot_for_directory(self, directory: str | Path) -> tuple[str | None, str | None]:
         """Resolve a directory to its mapped account slot, for `cswap run`.
@@ -1090,7 +1089,14 @@ class ClaudeAccountSwitcher:
         return org_name if org_name else "personal"
 
     def _find_account_by_alias(self, alias: str) -> str | None:
-        """Return the account number whose alias matches (case-insensitive), if any."""
+        """Return the account number whose alias matches (case-insensitive), if any.
+
+        An empty ``alias`` never matches: accounts without one store no
+        ``alias`` key, and comparing against an empty string would otherwise
+        match the first aliasless account.
+        """
+        if not alias:
+            return None
         data = self._get_sequence_data()
         if not data:
             return None
@@ -1243,9 +1249,10 @@ class ClaudeAccountSwitcher:
         self._migrate_org_fields()
 
         if alias is not None:
-            if not self._validate_alias(alias):
-                raise ValidationError(f"Invalid alias: {alias}")
-            alias = alias.lower()
+            try:
+                alias = normalize_alias(alias)
+            except ValueError as e:
+                raise ValidationError(str(e)) from e
 
         identity = self._get_current_account()
         if identity is None:
@@ -2506,12 +2513,12 @@ class ClaudeAccountSwitcher:
         print(bolded("Accounts:"))
         for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
-            alias_part = f" {muted(f'[{alias}]')}" if alias else ""
+            label = f"{accent(alias)} ({email})" if alias else email
             if is_active:
                 marker = f" {bold_accent('(active)')}"
-                print(f"  {num}: {email}{alias_part} {muted(f'[{tag}]')}{marker}")
+                print(f"  {num}: {label} {muted(f'[{tag}]')}{marker}")
             else:
-                print(f"  {num}: {email}{alias_part} {muted(f'[{tag}]')}")
+                print(f"  {num}: {label} {muted(f'[{tag}]')}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
 

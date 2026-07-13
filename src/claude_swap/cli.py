@@ -12,6 +12,7 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
 from claude_swap.printer import (
     accent,
+    bolded,
     dimmed,
     error,
     force_utf8_output,
@@ -382,13 +383,21 @@ Examples:
         _guard_root(switcher)
 
         if args.account is None:
-            switcher.list_aliases()
+            rows = switcher.list_aliases()
+            if not rows:
+                print(dimmed("No aliases set"))
+                return
+            print(bolded("Aliases:"))
+            for num, alias_name, email in rows:
+                print(f"  {num}: {alias_name} {muted(f'({email})')}")
             return
 
         if args.unset:
-            switcher.alias(args.account, unset=True)
+            account_num = switcher.unset_alias(args.account)
+            print(f"{accent('Removed alias')} for Account {account_num}")
         else:
-            switcher.alias(args.account, args.alias_name)
+            account_num, normalized = switcher.set_alias(args.account, args.alias_name)
+            print(f"{accent('Set alias')} '{normalized}' for Account {account_num}")
     except ClaudeSwitchError as e:
         error(f"Error: {e}")
         sys.exit(1)

@@ -21,7 +21,7 @@ from claude_swap.exceptions import (
     CredentialReadError,
     TransferError,
 )
-from claude_swap.models import Platform, get_timestamp
+from claude_swap.models import Platform, get_timestamp, normalize_alias
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -85,8 +85,11 @@ def _validate_imported_account(switcher: ClaudeAccountSwitcher, account: dict) -
                 )
 
     alias = account.get("alias")
-    if isinstance(alias, str) and not switcher._validate_alias(alias):
-        raise TransferError(f"invalid alias for {email}: {alias!r}")
+    if isinstance(alias, str):
+        try:
+            normalize_alias(alias)
+        except ValueError as e:
+            raise TransferError(f"invalid alias for {email}: {e}") from e
 
     return email, str(raw_number)
 
@@ -357,7 +360,7 @@ def import_accounts(
 
         alias = raw.get("alias") or None
         if alias:
-            alias_key = alias.lower()
+            alias_key = normalize_alias(alias)  # already validated in pass-1 above
             if alias_key in seen_aliases:
                 raise TransferError(f"duplicate alias in export: {alias_key}")
             seen_aliases.add(alias_key)
@@ -368,6 +371,8 @@ def import_accounts(
                     "existing account, dropping the imported alias"
                 )
                 alias = None
+            else:
+                alias = alias_key
 
         normalized.append(
             {

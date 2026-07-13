@@ -24,7 +24,7 @@ from claude_swap.exceptions import (
 )
 from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore
 from claude_swap.macos_keychain import KeychainError
-from claude_swap.models import Platform
+from claude_swap.models import Platform, normalize_alias
 from claude_swap.paths import get_backup_root, get_credentials_path
 from claude_swap.credentials import ActiveCredentials
 from claude_swap.switcher import (
@@ -305,17 +305,16 @@ class TestResolveAccountIdentifier:
 
 
 class TestAliasValidation:
-    """Test alias format validation."""
+    """Test alias format validation (models.normalize_alias)."""
 
     def test_valid_aliases(self, temp_home: Path):
-        switcher = ClaudeAccountSwitcher()
         for alias in ["dev", "work-1", "client_a", "team.b", "DEV"]:
-            assert switcher._validate_alias(alias), f"Expected {alias} to be valid"
+            normalize_alias(alias)  # must not raise
 
     def test_invalid_aliases(self, temp_home: Path):
-        switcher = ClaudeAccountSwitcher()
         for alias in ["123", "dev@work", "dev work", "", "dev/work", "-dev"]:
-            assert not switcher._validate_alias(alias), f"Expected {alias} to be invalid"
+            with pytest.raises(ValueError):
+                normalize_alias(alias)
 
 
 class TestResolveByAlias:
@@ -324,6 +323,17 @@ class TestResolveByAlias:
     def _write(self, switcher, data):
         switcher._setup_directories()
         switcher._write_json(switcher.sequence_file, data)
+
+    def test_empty_identifier_never_matches_aliasless_account(
+        self, temp_home: Path, sample_sequence_data: dict
+    ):
+        """An empty identifier must not silently resolve to whichever account
+        happens to have no alias set — it should just never match."""
+        switcher = ClaudeAccountSwitcher()
+        self._write(switcher, sample_sequence_data)
+
+        assert switcher._find_account_by_alias("") is None
+        assert switcher._resolve_account_identifier("") is None
 
     def test_resolve_by_alias(self, temp_home: Path, sample_sequence_data: dict):
         sample_sequence_data["accounts"]["2"]["alias"] = "dev"
@@ -375,47 +385,66 @@ class TestResolveByAlias:
 
 
 class TestAliasCommand:
-    """Test ClaudeAccountSwitcher.alias() / list_aliases()."""
+    """Test ClaudeAccountSwitcher.set_alias()/unset_alias()/list_aliases()."""
 
     def _write(self, switcher, data):
         switcher._setup_directories()
         switcher._write_json(switcher.sequence_file, data)
 
-    def test_set_alias_by_number(self, temp_home: Path, sample_sequence_data: dict, capsys):
+    def test_set_alias_by_number(self, temp_home: Path, sample_sequence_data: dict):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
-        switcher.alias("2", "dev")
+        num, normalized = switcher.set_alias("2", "dev")
 
+        assert num == "2"
+        assert normalized == "dev"
         data = switcher._get_sequence_data()
         assert data["accounts"]["2"]["alias"] == "dev"
 
     def test_set_alias_normalizes_to_lowercase(
-        self, temp_home: Path, sample_sequence_data: dict, capsys
+        self, temp_home: Path, sample_sequence_data: dict
     ):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
-        switcher.alias("2", "DEV")
+        _, normalized = switcher.set_alias("2", "DEV")
 
+        assert normalized == "dev"
         data = switcher._get_sequence_data()
         assert data["accounts"]["2"]["alias"] == "dev"
 
-    def test_set_alias_by_email(self, temp_home: Path, sample_sequence_data: dict, capsys):
+    def test_set_alias_by_email(self, temp_home: Path, sample_sequence_data: dict):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
-        switcher.alias("account2@example.com", "dev")
+        num, _ = switcher.set_alias("account2@example.com", "dev")
 
+        assert num == "2"
         data = switcher._get_sequence_data()
         assert data["accounts"]["2"]["alias"] == "dev"
+
+    def test_rename_via_existing_alias_identifier(
+        self, temp_home: Path, sample_sequence_data: dict
+    ):
+        """cswap alias <old> <new> — identifier can itself be an alias."""
+        switcher = ClaudeAccountSwitcher()
+        self._write(switcher, sample_sequence_data)
+        switcher.set_alias("1", "dev")
+
+        num, normalized = switcher.set_alias("dev", "prod")
+
+        assert num == "1"
+        assert normalized == "prod"
+        assert switcher._resolve_account_identifier("prod") == "1"
+        assert switcher._resolve_account_identifier("dev") is None
 
     def test_set_invalid_alias_raises(self, temp_home: Path, sample_sequence_data: dict):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
         with pytest.raises(ValidationError):
-            switcher.alias("2", "123")
+            switcher.set_alias("2", "123")
 
     def test_set_duplicate_alias_raises(self, temp_home: Path, sample_sequence_data: dict):
         sample_sequence_data["accounts"]["1"]["alias"] = "dev"
@@ -423,42 +452,57 @@ class TestAliasCommand:
         self._write(switcher, sample_sequence_data)
 
         with pytest.raises(ConfigError):
-            switcher.alias("2", "dev")
+            switcher.set_alias("2", "dev")
 
-    def test_unset_alias(self, temp_home: Path, sample_sequence_data: dict, capsys):
+    def test_unset_alias(self, temp_home: Path, sample_sequence_data: dict):
         sample_sequence_data["accounts"]["2"]["alias"] = "dev"
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
-        switcher.alias("2", unset=True)
+        num = switcher.unset_alias("2")
 
+        assert num == "2"
         data = switcher._get_sequence_data()
         assert "alias" not in data["accounts"]["2"]
+
+    def test_unset_alias_idempotent(self, temp_home: Path, sample_sequence_data: dict):
+        """Clearing an already-unset alias must not raise."""
+        switcher = ClaudeAccountSwitcher()
+        self._write(switcher, sample_sequence_data)
+
+        switcher.unset_alias("2")  # never set — should be a silent no-op
+        switcher.unset_alias("2")
 
     def test_alias_unknown_account_raises(self, temp_home: Path, sample_sequence_data: dict):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
         with pytest.raises(AccountNotFoundError):
-            switcher.alias("999", "dev")
+            switcher.set_alias("999", "dev")
 
-    def test_list_aliases(self, temp_home: Path, sample_sequence_data: dict, capsys):
+    def test_list_aliases(self, temp_home: Path, sample_sequence_data: dict):
         sample_sequence_data["accounts"]["2"]["alias"] = "dev"
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
-        switcher.list_aliases()
-        out = capsys.readouterr().out
-        assert "dev" in out
-        assert "account2@example.com" in out
+        assert switcher.list_aliases() == [("2", "dev", "account2@example.com")]
 
-    def test_list_aliases_empty(self, temp_home: Path, sample_sequence_data: dict, capsys):
+    def test_list_aliases_sequence_order(self, temp_home: Path, sample_sequence_data: dict):
+        switcher = ClaudeAccountSwitcher()
+        self._write(switcher, sample_sequence_data)
+        switcher.set_alias("2", "content")
+        switcher.set_alias("1", "dev")
+
+        assert switcher.list_aliases() == [
+            ("1", "dev", "account1@example.com"),
+            ("2", "content", "account2@example.com"),
+        ]
+
+    def test_list_aliases_empty(self, temp_home: Path, sample_sequence_data: dict):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
 
-        switcher.list_aliases()
-        out = capsys.readouterr().out
-        assert "No aliases set" in out
+        assert switcher.list_aliases() == []
 
 
 class TestDirectorySetup:
@@ -908,6 +952,32 @@ class TestListAccountsUsage:
         assert "└ 7d:" in output
         assert "10%" in output
         assert "50%" in output
+
+    def test_list_shows_alias_before_email(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
+    ):
+        """An aliased account renders 'alias (email)', leading with the alias
+        — the whole point is not having to read full addresses to tell
+        similar-looking accounts apart."""
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        sample_sequence_data["accounts"]["1"]["alias"] = "dev"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
+            switcher.list_accounts()
+
+        output = capsys.readouterr().out
+        assert "  1: dev (test@example.com) [personal] (active)" in output
+        # unaliased account keeps rendering plain email, no spurious parens
+        assert "  2: account2@example.com" in output
+        assert "(account2@example.com)" not in output
 
     def test_list_shows_usage_null_reset(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys

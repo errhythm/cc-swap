@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,35 @@ from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
+
+
+#: Alias validation: letters/digits/-/_/., non-empty, not purely digits (so an
+#: alias can never collide with a slot number in _resolve_account_identifier),
+#: and not leading with '-' (argparse would treat it as an option, making the
+#: alias impossible to pass back into any command once set).
+_ALIAS_RE = re.compile(r"^[a-z0-9_.-]+$")
+
+
+def normalize_alias(name: str) -> str:
+    """Lowercase and validate a proposed alias; raise ValueError if invalid.
+
+    Shared by the CLI (``cswap alias``), ``cswap add --alias``, and import
+    validation so every path enforces identical rules.
+    """
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("alias cannot be empty")
+    if normalized.isdigit():
+        raise ValueError(f"alias '{name}' cannot be purely numeric (reserved for slot numbers)")
+    if normalized.startswith("-"):
+        raise ValueError(
+            f"alias '{name}' cannot start with '-' (would be read as a command flag)"
+        )
+    if not _ALIAS_RE.match(normalized):
+        raise ValueError(
+            f"alias '{name}' may only contain letters, digits, '-', '_', and '.'"
+        )
+    return normalized
 
 
 class Platform(Enum):
