@@ -15,6 +15,7 @@ from claude_swap.exceptions import TransferError
 from claude_swap.models import Platform
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.transfer import export_accounts, import_accounts
+from claude_swap.usage_store import FetchRecord
 
 
 # ---------------------------------------------------------------------------
@@ -1374,3 +1375,136 @@ class TestImportSessionInvalidation:
         assert (session_dir / ".credentials.json").read_text() == "pre-import creds"
         alice = s._read_account_credentials("1", "alice@example.com")
         assert json.loads(alice)["_marker"] == "NEW"
+
+
+class TestImportClearsDeadTokenQuarantine:
+    """import must lift the persisted dead-token quarantine so an imported
+    credential can be re-tested — issues #136 / #138. Assertions are on the
+    quarantine verdict (token_dead / auth_dead_strikes), never on immediate
+    fetch-eligibility: clear_dead_token keeps lastAttemptAt, so a row can sit
+    inside its claim window right after import and an eligibility check would
+    be flaky."""
+
+    def test_import_force_lifts_quarantine(self, temp_home: Path):
+        """--force over an existing quarantined slot rewrites the creds and
+        lifts the verdict (the reported #138 workflow)."""
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 2, "bob@example.com")
+        ident = {"2": ("bob@example.com", "")}
+        s._usage_store.record({"2": FetchRecord(error="invalid_grant")}, ident)
+        assert s._usage_store.entries(ident)["2"].token_dead()
+
+        out = temp_home / "bob.cswap"
+        export_accounts(s, str(out), account="2")
+        env = json.loads(out.read_text())
+        env["accounts"][0]["credentials"]["_marker"] = "BOB_NEW"
+        out.write_text(json.dumps(env))
+
+        import_accounts(s, str(out), force=True)
+
+        entry = s._usage_store.entries(ident)["2"]
+        assert not entry.token_dead()
+        assert entry.auth_dead_strikes == 0
+        # Credential was actually overwritten.
+        creds = s._read_account_credentials("2", "bob@example.com")
+        assert json.loads(creds)["_marker"] == "BOB_NEW"
+
+    def test_reimport_after_removal_lifts_orphan_quarantine(
+        self, temp_home: Path, capsys
+    ):
+        """The case the overwrite-only fix would miss: `cswap remove` never
+        prunes usage.json, so re-importing a removed identity into the same
+        slot is classified `imported` yet inherits the orphan dead-token row.
+        A plain import (no --force) must still clear it."""
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 2, "bob@example.com")
+        ident = {"2": ("bob@example.com", "")}
+        s._usage_store.record({"2": FetchRecord(error="invalid_grant")}, ident)
+        assert s._usage_store.entries(ident)["2"].token_dead()
+
+        out = temp_home / "bob.cswap"
+        export_accounts(s, str(out), account="2")
+
+        # Simulate `cswap remove 2`: drop the sequence entry, leave the
+        # usage.json row behind (removal doesn't prune the usage store).
+        data = s._get_sequence_data()
+        del data["accounts"]["2"]
+        data["sequence"] = [n for n in data["sequence"] if n != 2]
+        s._write_json(s.sequence_file, data)
+
+        # Prove the orphan dead-token row is still present before re-import.
+        assert s._usage_store.entries(ident)["2"].token_dead()
+
+        import_accounts(s, str(out), force=False)
+
+        # Re-imported as a fresh slot (not an overwrite), yet un-quarantined.
+        assert "Imported bob@example.com" in capsys.readouterr().err
+        entry = s._usage_store.entries(ident)["2"]
+        assert not entry.token_dead()
+        assert entry.auth_dead_strikes == 0
+
+    def test_plain_import_skip_keeps_quarantine_and_hints(
+        self, temp_home: Path, capsys
+    ):
+        """A plain import that skips a still-existing quarantined account must
+        NOT touch its verdict (no creds written), and should point at --force
+        (issue #136 skip hint)."""
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 2, "bob@example.com")
+        ident = {"2": ("bob@example.com", "")}
+        s._usage_store.record({"2": FetchRecord(error="invalid_grant")}, ident)
+        assert s._usage_store.entries(ident)["2"].token_dead()
+
+        out = temp_home / "bob.cswap"
+        export_accounts(s, str(out), account="2")
+
+        import_accounts(s, str(out), force=False)
+
+        err = capsys.readouterr().err
+        assert "Skipped bob@example.com" in err
+        assert "currently quarantined — refresh token dead" in err
+        # No creds written → the verdict must stand.
+        assert s._usage_store.entries(ident)["2"].token_dead()
+
+    def test_plain_import_skip_of_healthy_account_emits_no_hint(
+        self, temp_home: Path, capsys
+    ):
+        """The quarantine hint is state-aware: a normal (non-quarantined) skip
+        must not print it."""
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 2, "bob@example.com")
+
+        out = temp_home / "bob.cswap"
+        export_accounts(s, str(out), account="2")
+
+        import_accounts(s, str(out), force=False)
+
+        err = capsys.readouterr().err
+        assert "Skipped bob@example.com" in err
+        assert "currently quarantined" not in err
+
+    def test_fresh_slot_import_creates_no_quarantine(self, temp_home: Path):
+        """Importing into a brand-new slot clears nothing real (no prior row);
+        the clear call is harmless and never quarantines the newcomer."""
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 2, "bob@example.com")
+        out = temp_home / "bob.cswap"
+        export_accounts(src, str(out), account="2")
+
+        dst_home = temp_home.parent / "dst_fresh"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home):
+            with patch.dict(os.environ, {"HOME": str(dst_home)}):
+                dst = _linux_switcher(dst_home)
+                import_accounts(dst, str(out))
+
+                seq = dst._get_sequence_data()
+                slot = next(
+                    n for n, a in seq["accounts"].items()
+                    if a["email"] == "bob@example.com"
+                )
+                entry = dst._usage_store.entries(
+                    {slot: ("bob@example.com", "")}
+                )[slot]
+                assert not entry.token_dead()
+                assert entry.auth_dead_strikes == 0

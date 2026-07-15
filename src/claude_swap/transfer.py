@@ -431,6 +431,19 @@ def import_accounts(
                 _eprint(
                     f"Skipped {entry['email']} (already exists, use --force)"
                 )
+                # If the stored backup is quarantined as refresh-token-dead,
+                # nudge the user toward --force — that path now rewrites the
+                # creds and lifts the verdict (issue #136). Identity-guarded, so
+                # a stale row for a different account returns an empty entry.
+                if (
+                    switcher._usage_store.entries(
+                        {existing_slot: (entry["email"], entry["org_uuid"])}
+                    )[existing_slot].token_dead()
+                ):
+                    _eprint(
+                        "  └ currently quarantined — refresh token dead; "
+                        "--force replaces the backup and lifts the old verdict"
+                    )
                 skipped += 1
                 # Even when skipped, the envelope's active account exists
                 # locally — record where so we can seed activeAccountNumber.
@@ -463,6 +476,16 @@ def import_accounts(
         )
         switcher._write_account_config(
             target_num, entry["email"], entry["config_text"]
+        )
+        # Every successful import write introduces credential material whose
+        # previous auth verdict is no longer authoritative, so lift any
+        # dead-token quarantine on this slot (mirrors add_account / the
+        # add-token paths). This clears for both "imported" and "overwrote":
+        # account removal doesn't prune usage.json, so re-importing a removed
+        # identity into the same slot would otherwise stay quarantined and
+        # never re-fetch to prove the imported token — issue #138.
+        switcher._usage_store.clear_dead_token(
+            [target_num], {target_num: (entry["email"], entry["org_uuid"])}
         )
 
         data.setdefault("accounts", {})
