@@ -398,7 +398,10 @@ class TestUsageRows:
     def test_codex_weekly_row_and_banked_reset_text(self):
         from claude_swap.tui.widgets import reset_credits_text, usage_rows
 
-        now = time.time()
+        # Keep the boundary exact across platforms: round-tripping an arbitrary
+        # time.time() value through ISO microseconds can land just below 48h,
+        # which the countdown correctly floors to "1d 23h".
+        now = 1_700_000_000.0
         usage = {
             "weekly": {"pct": 42.0},
             "reset_credits": {
