@@ -87,6 +87,19 @@ def test_usage_summary_partial_windows():
     assert menubar.usage_summary({"five_hour": {"pct": 5.0}}) == "5h 5%"
 
 
+def test_usage_summary_codex_weekly_and_banked_resets():
+    usage = {
+        "weekly": {"pct": 42.0},
+        "reset_credits": {
+            "available": 3,
+            "expires_at": _iso(2 * 86400),
+        },
+    }
+    assert menubar.usage_summary(usage, _NOW) == (
+        "Weekly 42% · Resets 3 (expires 2d 0h)"
+    )
+
+
 def test_usage_summary_includes_scoped_model_limits():
     # Per-model weekly limits (e.g. Fable) come through as usage["scoped"], after
     # 5h/7d and before spend.

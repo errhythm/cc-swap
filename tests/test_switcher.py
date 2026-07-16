@@ -4752,6 +4752,24 @@ class TestFormatUsageLines:
         assert "100%" in fable
         assert fable.rstrip().endswith("(!)")  # at/over limit marker
 
+    def test_codex_weekly_and_banked_resets(self):
+        from datetime import datetime, timedelta, timezone
+
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        lines = _format_usage_lines(
+            {
+                "weekly": {"pct": 42.0},
+                "reset_credits": {
+                    "available": 3,
+                    "expires_at": expires_at,
+                },
+            }
+        )
+
+        assert lines[0].startswith("Weekly:  42%")
+        assert lines[1].startswith("Resets: 3 banked")
+        assert "earliest expires" in lines[1]
+
     def test_scoped_under_limit_has_no_marker(self):
         usage = {"scoped": [{"name": "Fable", "pct": 40.0, "clock": "21:59", "countdown": "3h"}]}
         lines = _format_usage_lines(usage)

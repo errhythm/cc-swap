@@ -36,6 +36,19 @@ def usage_url(base_url: str) -> str:
     return f"{base}/api/codex/usage"
 
 
+def reset_credits_url(base_url: str) -> str:
+    """Build Codex's earned rate-limit reset details endpoint."""
+    base = base_url.rstrip("/")
+    if (
+        base.startswith("https://chatgpt.com")
+        or base.startswith("https://chat.openai.com")
+    ) and "/backend-api" not in base:
+        base = f"{base}/backend-api"
+    if "/backend-api" in base:
+        return f"{base}/wham/rate-limit-reset-credits"
+    return f"{base}/api/codex/rate-limit-reset-credits"
+
+
 def _jwt_claims(auth: dict[str, Any]) -> dict[str, Any]:
     tokens = auth.get("tokens")
     if not isinstance(tokens, dict):
@@ -101,6 +114,75 @@ def _window(window: object) -> dict[str, Any] | None:
     return result
 
 
+def _window_key(window: object, fallback: str) -> str:
+    """Classify a Codex quota window by duration, not API position.
+
+    Historically ``primary_window`` was the five-hour window and
+    ``secondary_window`` was weekly. Codex can now return only a weekly primary
+    window, so position alone would incorrectly label it as ``5h``.
+    """
+    if not isinstance(window, dict):
+        return fallback
+    seconds = window.get("limit_window_seconds", window.get("window_seconds"))
+    minutes = window.get("window_duration_mins", window.get("windowDurationMins"))
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+        if seconds == 7 * 24 * 60 * 60:
+            return "weekly"
+        if seconds == 5 * 60 * 60:
+            return "five_hour"
+    if isinstance(minutes, (int, float)) and not isinstance(minutes, bool):
+        if minutes == 7 * 24 * 60:
+            return "weekly"
+        if minutes == 5 * 60:
+            return "five_hour"
+    return fallback
+
+
+def _iso_timestamp(value: object) -> str | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (
+            datetime.fromtimestamp(value, timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+    return None
+
+
+def _reset_credits(payload: object) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    count = payload.get("available_count", payload.get("availableCount"))
+    if isinstance(count, bool) or not isinstance(count, (int, float)):
+        return None
+    result: dict[str, Any] = {"available": max(0, int(count))}
+    credits = payload.get("credits")
+    if isinstance(credits, list):
+        expiries = [
+            expires
+            for credit in credits
+            if isinstance(credit, dict)
+            and credit.get("status") == "available"
+            and (
+                expires := _iso_timestamp(
+                    credit.get("expires_at", credit.get("expiresAt"))
+                )
+            )
+        ]
+        if expiries:
+            result["expires_at"] = min(expiries)
+    return result
+
+
 def _convert_payload(payload: object) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise CodexUsageError("Codex usage response is not a JSON object")
@@ -108,15 +190,31 @@ def _convert_payload(payload: object) -> dict[str, Any]:
     if not isinstance(rate_limit, dict):
         raise CodexUsageError("Codex usage response has no rate-limit data")
     usage: dict[str, Any] = {}
-    primary = _window(rate_limit.get("primary_window"))
-    secondary = _window(rate_limit.get("secondary_window"))
+    primary_raw = rate_limit.get("primary_window")
+    secondary_raw = rate_limit.get("secondary_window")
+    primary = _window(primary_raw)
+    secondary = _window(secondary_raw)
     if primary is not None:
-        usage["five_hour"] = primary
+        usage[_window_key(primary_raw, "five_hour")] = primary
     if secondary is not None:
-        usage["seven_day"] = secondary
+        usage[_window_key(secondary_raw, "weekly")] = secondary
+    reset_credits = _reset_credits(payload.get("rate_limit_reset_credits"))
+    if reset_credits is not None:
+        usage["reset_credits"] = reset_credits
     if not usage:
         raise CodexUsageError("Codex did not return subscription usage windows for this account")
     return usage
+
+
+def _merge_reset_credit_details(usage: dict[str, Any], payload: object) -> None:
+    """Merge per-credit expiry details while keeping the usage count authoritative."""
+    details = _reset_credits(payload)
+    if details is None:
+        return
+    existing = usage.get("reset_credits")
+    if isinstance(existing, dict):
+        details["available"] = existing.get("available", details["available"])
+    usage["reset_credits"] = details
 
 
 def fetch_codex_usage(
@@ -125,7 +223,7 @@ def fetch_codex_usage(
     base_url: str = DEFAULT_CHATGPT_BASE_URL,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    """Fetch normalized Codex primary/secondary rate-limit windows."""
+    """Fetch normalized Codex quota windows and earned-reset availability."""
     url = usage_url(base_url)
     request = urllib.request.Request(url, headers=_headers(auth))
     try:
@@ -145,7 +243,31 @@ def fetch_codex_usage(
         raise CodexUsageError(f"Codex usage request failed: {exc.reason}") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CodexUsageError(f"Could not decode Codex usage response: {exc}") from exc
-    return _convert_payload(payload)
+    usage = _convert_payload(payload)
+
+    # The usage response carries the authoritative count. Fetch the separate
+    # detail endpoint only when there is something whose expiry can be shown;
+    # failure here must not hide otherwise valid quota data.
+    reset_credits = usage.get("reset_credits")
+    if isinstance(reset_credits, dict) and reset_credits.get("available", 0) > 0:
+        detail_headers = _headers(auth)
+        detail_headers["OpenAI-Beta"] = "codex-1"
+        detail_request = urllib.request.Request(
+            reset_credits_url(base_url), headers=detail_headers
+        )
+        try:
+            with urllib.request.urlopen(detail_request, timeout=timeout) as response:
+                details_payload = json.loads(response.read().decode("utf-8"))
+            _merge_reset_credit_details(usage, details_payload)
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
+            pass
+    return usage
 
 
 def refresh_codex_auth(

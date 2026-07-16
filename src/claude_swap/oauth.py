@@ -462,8 +462,10 @@ def relevant_windows(
 ) -> list[tuple[str, float, str | None]]:
     """Every ``(label, pct, resets_at)`` window that gates this account.
 
-    Always the 5-hour ("5h") and 7-day ("7d") windows. When ``models`` is
-    non-empty, each named per-model weekly ``scoped`` window is included too
+    Always includes the provider's account-wide windows: 5-hour ("5h") and
+    7-day ("7d") for Claude, or the canonical weekly window returned by newer
+    Codex plans. When ``models`` is non-empty, each named per-model weekly
+    ``scoped`` window is included too
     (matched case-insensitively on display name, e.g. "Fable"; the sentinel
     ``all`` matches every scoped window the account reports). The single
     canonical window source for decisions, scheduling, and reset math — so a
@@ -475,7 +477,11 @@ def relevant_windows(
     if not isinstance(usage, dict):
         return []
     windows: list[tuple[str, float, str | None]] = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key, label in (
+        ("five_hour", "5h"),
+        ("seven_day", "7d"),
+        ("weekly", "Weekly"),
+    ):
         window = usage.get(key)
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
             windows.append((label, float(window["pct"]), window.get("resets_at")))

@@ -68,6 +68,14 @@ def usage_to_json(usage: dict) -> dict:
         out["fiveHour"] = _window_to_json(usage["five_hour"])
     if "seven_day" in usage:
         out["sevenDay"] = _window_to_json(usage["seven_day"])
+    if "weekly" in usage:
+        out["weekly"] = _window_to_json(usage["weekly"])
+    if "reset_credits" in usage:
+        resets = usage["reset_credits"]
+        resets_out = {"available": resets["available"]}
+        if "expires_at" in resets:
+            resets_out["earliestExpiresAt"] = resets["expires_at"]
+        out["resetCredits"] = resets_out
     if "spend" in usage:
         spend = usage["spend"]
         spend_out: dict = {

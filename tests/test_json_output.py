@@ -27,6 +27,25 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 # Serialization helpers
 # --------------------------------------------------------------------------- #
 class TestJsonHelpers:
+    def test_usage_to_json_projects_codex_weekly_and_reset_credits(self):
+        out = usage_to_json(
+            {
+                "weekly": {"pct": 42.0},
+                "reset_credits": {
+                    "available": 3,
+                    "expires_at": "2026-07-20T12:00:00Z",
+                },
+            }
+        )
+
+        assert out == {
+            "weekly": {"pct": 42.0},
+            "resetCredits": {
+                "available": 3,
+                "earliestExpiresAt": "2026-07-20T12:00:00Z",
+            },
+        }
+
     def test_usage_to_json_maps_keys_and_preserves_raw_reset(self):
         resets_at = (datetime.now(timezone.utc) + timedelta(hours=4, seconds=30)).isoformat()
         countdown, clock = oauth.format_reset(resets_at)

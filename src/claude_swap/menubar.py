@@ -89,7 +89,11 @@ def tightest_pct(usage: dict | str | None) -> float | None:
         return None
     pcts = [
         window["pct"]
-        for window in (usage.get("five_hour"), usage.get("seven_day"))
+        for window in (
+            usage.get("five_hour"),
+            usage.get("seven_day"),
+            usage.get("weekly"),
+        )
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float))
     ]
     return max(pcts) if pcts else None
@@ -178,9 +182,13 @@ def usage_summary(usage: dict | str | None, now: float | None = None) -> str:
     if now is None:
         now = time.time()
     parts: list[str] = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key, label in (
+        ("five_hour", "5h"),
+        ("seven_day", "7d"),
+        ("weekly", "Weekly"),
+    ):
         window = usage.get(key)
-        if key == "seven_day":
+        if key in ("seven_day", "weekly"):
             window = _rolled_weekly_window(window, now)  # reflect a passed weekly reset
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
             seg = f"{label} {window['pct']:.0f}%"
@@ -188,6 +196,16 @@ def usage_summary(usage: dict | str | None, now: float | None = None) -> str:
             if countdown:
                 seg += f" ({countdown})"  # time until this window resets
             parts.append(seg)
+    reset_credits = usage.get("reset_credits")
+    if isinstance(reset_credits, dict) and isinstance(
+        reset_credits.get("available"), int
+    ):
+        seg = f"Resets {reset_credits['available']}"
+        expiry = {"resets_at": reset_credits.get("expires_at")}
+        countdown = _live_countdown(expiry, now)
+        if countdown:
+            seg += f" (expires {countdown})"
+        parts.append(seg)
     # Per-model weekly limits (e.g. Fable), from the usage API's ``limits`` array.
     for window in usage.get("scoped") or []:
         window = _rolled_weekly_window(window, now)  # weekly cadence, same roll-forward
@@ -247,7 +265,9 @@ def format_title(
         if p is not None:
             segments.append(f"{p:.0f}%")
     if settings.title_pct in ("7d", "both"):
-        seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
+        seven = None
+        if isinstance(active_usage, dict):
+            seven = active_usage.get("seven_day") or active_usage.get("weekly")
         seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
         p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
         if p is not None:
@@ -273,7 +293,11 @@ def format_usage_log(email: str, usage: dict | str | None) -> str | None:
     logging nothing.
     """
     parts: list[str] = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key, label in (
+        ("five_hour", "5h"),
+        ("seven_day", "7d"),
+        ("weekly", "Weekly"),
+    ):
         pct = _window_pct(usage, key)
         if pct is None:
             continue
@@ -289,12 +313,15 @@ def format_usage_log(email: str, usage: dict | str | None) -> str | None:
 
 
 def _usage_log_key(usage: dict | str | None) -> tuple[float | None, float | None]:
-    """De-dupe key for usage logging: the (5h, 7d) percentages only.
+    """De-dupe key for usage logging: the short and weekly percentages only.
 
     Reset clocks change every refresh; keying on the percentages means an idle
     account isn't re-logged every cycle.
     """
-    return (_window_pct(usage, "five_hour"), _window_pct(usage, "seven_day"))
+    weekly = _window_pct(usage, "seven_day")
+    if weekly is None:
+        weekly = _window_pct(usage, "weekly")
+    return (_window_pct(usage, "five_hour"), weekly)
 
 
 _SWITCH_LOG_RE = re.compile(r"Switched from account (\d+) to (\d+)")

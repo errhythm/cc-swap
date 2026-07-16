@@ -36,6 +36,9 @@ def test_usage_url_matches_codex_backend_paths():
     assert codex_usage.usage_url("https://example.test/api") == (
         "https://example.test/api/api/codex/usage"
     )
+    assert codex_usage.reset_credits_url("https://chatgpt.com") == (
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+    )
 
 
 def test_fetch_usage_sends_codex_auth_headers_and_normalizes_windows(monkeypatch):
@@ -78,7 +81,144 @@ def test_fetch_usage_sends_codex_auth_headers_and_normalizes_windows(monkeypatch
     }
     assert usage == {
         "five_hour": {"pct": 12.5, "resets_at": "2027-01-15T08:00:00Z"},
-        "seven_day": {"pct": 65.0},
+        "weekly": {"pct": 65.0},
+    }
+
+
+def test_weekly_only_primary_is_classified_from_duration(monkeypatch):
+    class Response:
+        def read(self):
+            return json.dumps(
+                {
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 42,
+                            "limit_window_seconds": 7 * 24 * 60 * 60,
+                            "reset_at": 1_800_000_000,
+                        },
+                        "secondary_window": None,
+                    }
+                }
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        codex_usage.urllib.request, "urlopen", lambda request, *, timeout: Response()
+    )
+
+    assert codex_usage.fetch_codex_usage(_auth()) == {
+        "weekly": {"pct": 42.0, "resets_at": "2027-01-15T08:00:00Z"}
+    }
+
+
+def test_fetch_usage_adds_banked_reset_count_and_earliest_expiry(monkeypatch):
+    requested = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(request, *, timeout):
+        requested.append(request)
+        if request.full_url.endswith("/usage"):
+            return Response(
+                {
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 12,
+                            "limit_window_seconds": 604_800,
+                        }
+                    },
+                    "rate_limit_reset_credits": {"available_count": 3},
+                }
+            )
+        return Response(
+            {
+                "available_count": 3,
+                "credits": [
+                    {
+                        "status": "available",
+                        "expires_at": "2026-08-10T12:00:00Z",
+                    },
+                    {
+                        "status": "redeemed",
+                        "expires_at": "2026-07-01T12:00:00Z",
+                    },
+                    {
+                        "status": "available",
+                        "expires_at": "2026-07-20T12:00:00Z",
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr(codex_usage.urllib.request, "urlopen", urlopen)
+
+    usage = codex_usage.fetch_codex_usage(_auth())
+
+    assert usage == {
+        "weekly": {"pct": 12.0},
+        "reset_credits": {
+            "available": 3,
+            "expires_at": "2026-07-20T12:00:00Z",
+        },
+    }
+    assert requested[1].full_url.endswith("/wham/rate-limit-reset-credits")
+    headers = {name.lower(): value for name, value in requested[1].header_items()}
+    assert headers["openai-beta"] == "codex-1"
+
+
+def test_reset_credit_detail_failure_keeps_usage_and_count(monkeypatch):
+    class Response:
+        def read(self):
+            return json.dumps(
+                {
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 12,
+                            "limit_window_seconds": 604_800,
+                        }
+                    },
+                    "rate_limit_reset_credits": {"available_count": 2},
+                }
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    calls = 0
+
+    def urlopen(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return Response()
+        raise codex_usage.urllib.error.HTTPError(
+            request.full_url, 503, "Unavailable", {}, None
+        )
+
+    monkeypatch.setattr(codex_usage.urllib.request, "urlopen", urlopen)
+
+    assert codex_usage.fetch_codex_usage(_auth()) == {
+        "weekly": {"pct": 12.0},
+        "reset_credits": {"available": 2},
     }
 
 

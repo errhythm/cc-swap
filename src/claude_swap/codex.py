@@ -518,7 +518,11 @@ class CodexAccountSwitcher:
             if account["status"]:
                 print(f"  {account['status']}")
             elif account["usage"]:
-                for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+                for key, label in (
+                    ("five_hour", "5h"),
+                    ("seven_day", "7d"),
+                    ("weekly", "Weekly"),
+                ):
                     window = account["usage"].get(key)
                     if isinstance(window, dict):
                         line = f"  {label}: {window.get('pct', 0):.0f}% used"
@@ -526,6 +530,16 @@ class CodexAccountSwitcher:
                         if isinstance(resets_at, str) and resets_at:
                             countdown, clock = format_reset(resets_at)
                             line += f" · resets in {countdown} ({clock})"
+                        print(line)
+                reset_credits = account["usage"].get("reset_credits")
+                if isinstance(reset_credits, dict):
+                    count = reset_credits.get("available")
+                    if isinstance(count, int):
+                        line = f"  Banked resets: {count}"
+                        expires_at = reset_credits.get("expires_at")
+                        if isinstance(expires_at, str) and expires_at:
+                            countdown, clock = format_reset(expires_at)
+                            line += f" · earliest expires in {countdown} ({clock})"
                         print(line)
             else:
                 print(f"  usage unavailable: {account['error'] or 'no data returned'}")

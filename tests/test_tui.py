@@ -395,6 +395,25 @@ class TestUsageRows:
         assert " · " in spend[3]
         assert spend[3].index(" · ") < spend[3].index("$12.50")
 
+    def test_codex_weekly_row_and_banked_reset_text(self):
+        from claude_swap.tui.widgets import reset_credits_text, usage_rows
+
+        now = time.time()
+        usage = {
+            "weekly": {"pct": 42.0},
+            "reset_credits": {
+                "available": 3,
+                "expires_at": datetime.fromtimestamp(
+                    now + 2 * 86400, timezone.utc
+                ).isoformat(),
+            },
+        }
+
+        assert [row[0] for row in usage_rows(usage, now)] == ["Weekly"]
+        assert reset_credits_text(usage, now) == (
+            "3 banked · earliest expires 2d"
+        )
+
     def test_no_data_no_rows(self):
         from claude_swap.tui.widgets import usage_rows
 
