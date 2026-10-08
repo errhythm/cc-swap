@@ -1,0 +1,14 @@
+{
+  "name": "ccswap",
+  "description": "ccswap's Claude Code mod",
+  "owner": {
+    "name": "Ehsanur Rahman Rhythm"
+  },
+  "plugins": [
+    {
+      "name": "ccswap",
+      "source": "./mod",
+      "description": "/ccswap command, accounts pane, switch toast and quota band, driven by the ccswap CLI"
+    }
+  ]
+}

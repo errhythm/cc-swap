@@ -66,6 +66,13 @@ class DashboardScreen(Screen):
         super().__init__()
         # Stack of (title, entries); depth 1 = root menu.
         self._menu_stack: list[tuple[str, MenuEntries]] = []
+        # Live Claude Code integration state; None until the first off-thread
+        # read (`claude plugin list` takes about a second).
+        self._claude_state: dict[str, bool | None] = {
+            "claude.statusline": None,
+            "claude.mod": None,
+        }
+        self._claude_busy = False
 
     def compose(self) -> ComposeResult:
         yield AccountsPanel(
@@ -166,8 +173,60 @@ class DashboardScreen(Screen):
             (f"Dashboard view: {view_labels[self.app._view]}", "setting:view"),
             (f"Auto-switch threshold: {threshold_label}%", "setting:threshold"),
             (f"Auto-switch strategy: {self.app._strategy_name}", "setting:strategy"),
+            (f"Claude statusline: {self._claude_label('claude.statusline')}",
+             "claude:claude.statusline"),
+            (f"Claude Code mod: {self._claude_label('claude.mod')}", "claude:claude.mod"),
             _BACK,
         ]
+
+    def _claude_label(self, key: str) -> str:
+        state = self._claude_state[key]
+        if self._claude_busy or state is None:
+            return "…"
+        return "on" if state else "off"
+
+    def _start_claude_work(self, key: str | None = None, on: bool = False) -> None:
+        """Read (and with ``key``, first toggle) the Claude integrations off
+        the UI thread: install/uninstall shells out to `claude plugin`."""
+        self._claude_busy = True
+        self.run_worker(
+            partial(self._claude_work, key, on),
+            thread=True,
+            group="claude",
+            exit_on_error=False,
+        )
+
+    def _claude_work(self, key: str | None, on: bool) -> None:
+        from claude_swap.claude_integration import is_enabled, set_enabled
+
+        message, severity = None, "information"
+        if key is not None:
+            try:
+                message = set_enabled(
+                    self.app.switcher_for("claude").backup_dir, key, on
+                )
+            except Exception as exc:  # surface any failure; never crash the UI
+                message, severity = f"Could not change {key}: {exc}", "error"
+        state = {k: is_enabled(k) for k in self._claude_state}
+        self.app.call_from_thread(self._claude_done, state, message, severity)
+
+    async def _claude_done(
+        self, state: dict[str, bool | None], message: str | None, severity: str
+    ) -> None:
+        self._claude_busy = False
+        self._claude_state = state
+        if message:
+            self.app.notify(message, severity=severity, timeout=6)
+        if self._menu_stack and self._menu_stack[-1][0] == "settings":
+            await self._refresh_settings_menu()
+
+    async def _refresh_settings_menu(self) -> None:
+        menu = self.query_one("#menu", ListView)
+        index = menu.index
+        self._menu_stack[-1] = ("settings", self._settings_entries())
+        await self._render_menu()
+        # Unlike a new menu, cycling refreshes this menu in place: keep its row.
+        menu.index = index
 
     async def _push_menu(self, title: str, entries: MenuEntries) -> None:
         self._menu_stack.append((title, entries))
@@ -231,6 +290,16 @@ class DashboardScreen(Screen):
             app.confirm_remove(provider, number, email)
         elif action_id == "settings-menu":
             await self._push_menu("settings", self._settings_entries())
+            if not self._claude_busy:
+                self._start_claude_work()
+        elif action_id.startswith("claude:"):
+            key = action_id.split(":", 1)[1]
+            state = self._claude_state[key]
+            if self._claude_busy or state is None:
+                app.notify("Still checking Claude Code, try again in a moment")
+                return
+            self._start_claude_work(key, not state)
+            await self._refresh_settings_menu()
         elif action_id.startswith("setting:"):
             key = action_id.split(":", 1)[1]
             if key == "theme":
@@ -267,12 +336,7 @@ class DashboardScreen(Screen):
                 # depends on AutoScreen staying top for its engine's whole
                 # lifetime; if the screen model changes, guards belong here.
                 app.apply_strategy(value)
-            menu = self.query_one("#menu", ListView)
-            index = menu.index
-            self._menu_stack[-1] = ("settings", self._settings_entries())
-            await self._render_menu()
-            # Unlike a new menu, cycling refreshes this menu in place: keep its row.
-            menu.index = index
+            await self._refresh_settings_menu()
         elif action_id == "disable-menu":
             await self._push_menu("disable / enable", self._disable_entries())
         elif action_id.startswith("disable:"):

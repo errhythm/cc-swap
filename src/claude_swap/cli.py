@@ -901,9 +901,11 @@ def _config_command(argv: list[str]) -> None:
     loudly here instead of silently degrading at `cswap auto` time.
     """
     from claude_swap.settings import (
+        ACTION_KEYS,
         SETTING_SPECS,
         effective_settings,
         format_setting_value,
+        parse_setting_value,
         set_setting,
         setting_spec,
         settings_path,
@@ -930,6 +932,8 @@ Examples:
   ccswap config get autoswitch.threshold
   ccswap config set autoswitch.threshold 80
   ccswap config unset autoswitch.threshold   # back to the default
+  ccswap config set claude.statusline on     # ccswap statusline in Claude Code
+  ccswap config set claude.mod on            # install the ccswap mod
   ccswap config path                         # where settings.json lives
         """,
     )
@@ -1001,7 +1005,7 @@ Examples:
         elif action == "get":
             spec = setting_spec(args.key)
             value, is_set = next(
-                (v, s) for sp, v, s in effective_settings(root) if sp is spec
+                (v, s) for sp, v, s in effective_settings(root, spec.dotted) if sp is spec
             )
             if json_mode:
                 payload = {
@@ -1013,6 +1017,12 @@ Examples:
                 print(json.dumps(payload, indent=2))
             else:
                 print(format_setting_value(value))
+        elif action in ("set", "unset") and args.key in ACTION_KEYS:
+            # Action keys install/uninstall; unset means back to the default, off.
+            from claude_swap.claude_integration import set_enabled
+
+            on = action == "set" and parse_setting_value(setting_spec(args.key), args.value)
+            print(set_enabled(root, args.key, on))
         elif action == "set":
             value = set_setting(root, args.key, args.value)
             print(f"{args.key} = {format_setting_value(value)}")
@@ -1121,6 +1131,12 @@ def _menubar_service(args) -> int:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    # Claude Code's statusLine command: local reads only, so it runs before
+    # TLS setup, theme probing, and anything else that could print or block.
+    if sys.argv[1:2] == ["statusline"]:
+        from claude_swap.statusline import main as statusline_main
+
+        sys.exit(statusline_main())
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]

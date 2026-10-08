@@ -657,7 +657,15 @@ def run(switcher) -> int:
                 self._codex_auth_mtime = 0.0
             self._codex_engine = None
             self._codex_engine_events: list = []
+            # Claude Code integrations: live state read off the main thread
+            # (`claude plugin list` takes about a second); None until known.
+            # A finished toggle leaves (ok, message) in _claude_note for the
+            # sync tick to show on the main thread.
+            self._claude_state = {"claude.statusline": None, "claude.mod": None}
+            self._claude_busy = False
+            self._claude_note = None
             self.rebuild_menu()
+            self._start_claude_work()
             # Background display refresh on the user's interval, plus a fast
             # UI-sync tick that applies snapshots + engine events on the main thread.
             self.refresh_timer = rumps.Timer(self.on_refresh_tick, self.settings.refresh_interval)
@@ -743,6 +751,13 @@ def run(switcher) -> int:
             if self._dirty:
                 self._dirty = False
                 self.rebuild_menu()
+            note, self._claude_note = self._claude_note, None
+            if note is not None:
+                ok, message = note
+                if ok:
+                    rumps.notification("ccswap", "Claude Code", message)
+                else:
+                    rumps.alert(title="ccswap", message=message)
             self._detect_active_change()
             self._detect_codex_active_change()
             self._drain_engine_events()
@@ -1147,6 +1162,19 @@ def run(switcher) -> int:
                 threshold_menu.add(ch)
             menu.add(threshold_menu)
 
+            for key, label in (
+                ("claude.statusline", "Claude statusline"),
+                ("claude.mod", "Claude Code mod"),
+            ):
+                state = self._claude_state[key]
+                known = state is not None and not self._claude_busy
+                item = rumps.MenuItem(
+                    label if known else f"{label} (checking…)",
+                    callback=self._make_claude_toggle(key) if known else None,
+                )
+                item.state = 1 if state else 0
+                menu.add(item)
+
             return menu
 
         # ---- callbacks --------------------------------------------------------
@@ -1363,6 +1391,33 @@ def run(switcher) -> int:
             else:
                 self._stop_codex_engine()
             self.rebuild_menu()
+
+        def _start_claude_work(self, key=None, on=False):
+            self._claude_busy = True
+            threading.Thread(
+                target=self._claude_work, args=(key, on), daemon=True
+            ).start()
+
+        def _claude_work(self, key, on):
+            from claude_swap.claude_integration import is_enabled, set_enabled
+
+            try:
+                if key is not None:
+                    try:
+                        message = set_enabled(self.switcher.backup_dir, key, on)
+                        self._claude_note = (True, message)
+                    except Exception as e:
+                        self._claude_note = (False, f"Couldn't change {key}: {e}")
+                self._claude_state = {k: is_enabled(k) for k in self._claude_state}
+            finally:
+                self._claude_busy = False
+                self._dirty = True  # rebuilt by on_sync_tick on the main thread
+
+        def _make_claude_toggle(self, key):
+            def cb(_sender):
+                self._start_claude_work(key, not self._claude_state[key])
+                self.rebuild_menu()
+            return cb
 
         def _make_threshold(self, pct):
             def cb(_sender):

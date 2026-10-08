@@ -28,6 +28,13 @@ from claude_swap.tui import data as tui_data
 from claude_swap.usage_store import UsageEntry
 
 
+@pytest.fixture(autouse=True)
+def _no_claude_plugin_list():
+    # The Settings menu reads the mod's state through the real `claude` CLI.
+    with patch("claude_swap.claude_integration.mod_installed", return_value=False):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------

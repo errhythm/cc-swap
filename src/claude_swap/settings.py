@@ -2,7 +2,8 @@
 
 One versioned JSON file for user-tunable claude-swap preferences, written
 atomically with the backup dir's 0600/0700 modes. v1 carries the
-``autoswitch`` and ``ui`` sections; other sections can be added additively.
+``autoswitch`` and ``ui`` sections, plus ``claude`` (the statusline saved
+by ``claude_integration``); other sections can be added additively.
 Unknown keys (future fields, other tools' experiments) survive a round trip.
 
 Reading is forgiving — a missing or corrupt file yields defaults with a logged
@@ -73,7 +74,21 @@ class UiSettings:
     view: str = "combined"
 
 
-_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings}
+@dataclass(frozen=True)
+class ClaudeIntegrationSettings:
+    """Claude Code integrations (``claude`` section): action keys whose value
+    is read live from Claude Code (see ``claude_integration``), never stored.
+    The section itself only holds ``previousStatusline``."""
+
+    statusline: bool = False
+    mod: bool = False
+
+
+_SECTION_DEFAULT_SOURCES = {
+    "autoswitch": AutoSwitchSettings,
+    "ui": UiSettings,
+    "claude": ClaudeIntegrationSettings,
+}
 
 
 @dataclass(frozen=True)
@@ -155,8 +170,20 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             choices=("combined", "claude", "codex"),
             help="Dashboard view: both providers, or only one",
         ),
+        SettingSpec(
+            "claude", "statusline", "statusline", "bool",
+            help="ccswap statusline in Claude Code (off restores yours)",
+        ),
+        SettingSpec(
+            "claude", "mod", "mod", "bool",
+            help="ccswap mod (Claude Code plugin ccswap@ccswap)",
+        ),
     )
 }
+
+# Setting these runs an install/uninstall instead of writing settings.json;
+# their value is whatever Claude Code currently has.
+ACTION_KEYS = frozenset({"claude.statusline", "claude.mod"})
 
 _AUTOSWITCH_KEYS: dict[str, str] = {
     spec.field: spec.json_key
@@ -309,8 +336,8 @@ def setting_spec(dotted_key: str) -> SettingSpec:
 
 
 _BOOL_WORDS = {
-    "true": True, "1": True, "yes": True,
-    "false": False, "0": False, "no": False,
+    "true": True, "1": True, "yes": True, "on": True,
+    "false": False, "0": False, "no": False, "off": False,
 }
 
 
@@ -326,7 +353,7 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
         parsed = _BOOL_WORDS.get(raw_value.strip().lower())
         if parsed is None:
             raise ConfigError(
-                f"{spec.dotted} expects true or false (or 1/0, yes/no), "
+                f"{spec.dotted} expects true or false (or 1/0, yes/no, on/off), "
                 f"got '{raw_value}'"
             )
         return parsed
@@ -408,6 +435,11 @@ def set_setting(backup_root: Path, dotted_key: str, raw_value: str):
     """
     spec = setting_spec(dotted_key)
     value = parse_setting_value(spec, raw_value)
+    if dotted_key in ACTION_KEYS:
+        from claude_swap.claude_integration import set_enabled
+
+        set_enabled(backup_root, dotted_key, value)
+        return value
     path = settings_path(backup_root)
     raw = _read_raw_for_write(path)
     raw["schemaVersion"] = raw.get("schemaVersion", SETTINGS_SCHEMA_VERSION)
@@ -436,13 +468,19 @@ def unset_setting(backup_root: Path, dotted_key: str) -> bool:
     return True
 
 
-def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, bool]]:
+def effective_settings(
+    backup_root: Path, only: str | None = None
+) -> list[tuple[SettingSpec, object, bool]]:
     """(spec, effective value, explicitly set?) per key, in registry order.
 
     "Set" means the key is present in the raw file — an explicit value equal
     to the default still counts — so `cswap config`'s "(default)" marker
-    reflects the file, not value equality.
+    reflects the file, not value equality. Action keys report Claude Code's
+    live state instead, "set" when on. ``only`` limits the rows to one key,
+    so a single lookup doesn't shell out to `claude plugin list` for nothing.
     """
+    from claude_swap.claude_integration import is_enabled
+
     raw = _read_raw(settings_path(backup_root))
     loaded = {
         "autoswitch": load_settings(backup_root),
@@ -450,6 +488,12 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     }
     rows = []
     for spec in SETTING_SPECS.values():
+        if only is not None and spec.dotted != only:
+            continue
+        if spec.dotted in ACTION_KEYS:
+            value = is_enabled(spec.dotted)
+            rows.append((spec, value, value))
+            continue
         section = raw.get(spec.section)
         is_set = isinstance(section, dict) and spec.json_key in section
         rows.append((spec, getattr(loaded[spec.section], spec.field), is_set))

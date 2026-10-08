@@ -7,11 +7,13 @@ import json
 import stat
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from claude_swap.exceptions import ConfigError
 from claude_swap.settings import (
+    ClaudeIntegrationSettings,
     SETTING_SPECS,
     atomic_write_json,
     AutoSwitchSettings,
@@ -191,7 +193,11 @@ class TestSettingSpecs:
         }
 
     def test_defaults_match_dataclass(self):
-        sources = {"autoswitch": AutoSwitchSettings(), "ui": UiSettings()}
+        sources = {
+            "autoswitch": AutoSwitchSettings(),
+            "ui": UiSettings(),
+            "claude": ClaudeIntegrationSettings(),
+        }
         for spec in SETTING_SPECS.values():
             assert spec.default == getattr(sources[spec.section], spec.field)
 
@@ -281,6 +287,12 @@ class TestSetUnsetSetting:
 
 
 class TestEffectiveSettings:
+    @pytest.fixture(autouse=True)
+    def _no_claude_cli(self):
+        # The mod row's live state comes from `claude plugin list`.
+        with patch("claude_swap.claude_integration.mod_installed", return_value=False):
+            yield
+
     def test_missing_file_reports_all_defaults(self, tmp_path: Path):
         rows = effective_settings(tmp_path)
         assert len(rows) == len(SETTING_SPECS)

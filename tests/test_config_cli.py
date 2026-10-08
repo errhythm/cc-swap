@@ -12,6 +12,14 @@ import pytest
 from claude_swap import cli
 
 
+@pytest.fixture(autouse=True)
+def _no_claude_cli():
+    """Listing reads the mod's live state via `claude plugin list`; keep the
+    real Claude Code CLI out of these tests."""
+    with patch("claude_swap.claude_integration.mod_installed", return_value=False):
+        yield
+
+
 def _run(argv: list[str], capsys) -> tuple[int, str, str]:
     """Run `cswap config <argv>`; returns (exit_code, stdout, stderr).
 
@@ -51,9 +59,11 @@ class TestConfigList:
             "autoswitch.windows",
             "ui.theme",
             "ui.view",
+            "claude.statusline",
+            "claude.mod",
         ):
             assert key in out
-        assert out.count("(default)") == 11
+        assert out.count("(default)") == 13
 
     def test_set_key_not_marked_default(self, temp_home, capsys):
         _run(["set", "autoswitch.cooldownSeconds", "600"], capsys)
@@ -80,7 +90,8 @@ class TestConfigList:
         assert payload["schemaVersion"] == 1
         assert payload["path"].endswith("settings.json")
         by_key = {entry["key"]: entry for entry in payload["settings"]}
-        assert len(by_key) == 11
+        assert len(by_key) == 13
+        assert by_key["claude.statusline"]["value"] is False
         assert by_key["autoswitch.threshold"]["value"] == 90.0
         assert by_key["autoswitch.threshold"]["isSet"] is False
         assert by_key["autoswitch.includeApiKeyAccounts"]["value"] is False
