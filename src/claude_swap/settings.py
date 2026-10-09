@@ -34,14 +34,17 @@ _logger = logging.getLogger("claude-swap")
 class AutoSwitchSettings:
     """Policy knobs for the auto-switch engine (``cswap auto``).
 
-    ``threshold`` is binding-window utilization (max of the 5h/7d percentages):
-    at or above it the engine looks for a better account. 90 rather than 95
-    leaves margin for the macOS ~30s Keychain pickup tail and for heavy
-    subagent turns burning past the mark before a swap lands. A proactive
-    candidate must itself sit below the threshold (never land somewhere that
-    re-triggers next tick) and beat the active account's utilization by at
-    least ``hysteresis_pct``, so two accounts hovering at the line never
-    ping-pong while a strictly better account is always taken.
+    ``threshold`` is the default gate: a window at or above it makes the
+    engine look for a better account. 90 rather than 95 leaves margin for
+    the macOS ~30s Keychain pickup tail and for heavy subagent turns burning
+    past the mark before a swap lands. Optional per-gate overrides
+    (``threshold_5h``, ``threshold_7d``, ``model_thresholds``) replace that
+    number for one window only — any gate tripping switches, so Fable can
+    leave earlier than the 5-hour window. A proactive candidate must itself
+    sit below every gate (never land somewhere that re-triggers next tick)
+    and beat the active account by at least ``hysteresis_pct``, so two
+    accounts hovering at the line never ping-pong while a strictly better
+    account is always taken.
     """
 
     threshold: float = 90.0
@@ -63,15 +66,26 @@ class AutoSwitchSettings:
     # for someone happy to run their weekly quota all the way down), or "7d"
     # (ignore the rolling session window, switch only on the weekly one).
     windows: str = "both"
+    # Optional per-gate thresholds. None inherits ``threshold``. Any one gate
+    # at or over its own number triggers a switch, so the session window, the
+    # weekly window, and a model like Fable can each have their own wall.
+    threshold_5h: float | None = None
+    threshold_7d: float | None = None
+    # "Fable=40" or "Fable=40,Opus=70". Named models become gates even when
+    # absent from ``model``; a model listed in ``model`` without an entry
+    # here still uses ``threshold``.
+    model_thresholds: str | None = None
 
 
 @dataclass(frozen=True)
 class UiSettings:
     """Appearance preferences (``ui`` section). ``theme`` selects the TUI/CLI
-    color theme; ``auto`` follows terminal-background detection."""
+    color theme; ``auto`` follows terminal-background detection. ``mask``
+    redacts account emails and organization names in the TUI."""
 
     theme: str = "auto"
     view: str = "combined"
+    mask: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,7 +117,7 @@ class SettingSpec:
     section: str  # top-level JSON section ("autoswitch", "ui")
     json_key: str  # camelCase key inside the section
     field: str  # snake_case AutoSwitchSettings field
-    kind: str  # "float" | "int" | "bool" | "choice"
+    kind: str  # "float" | "optional_float" | "int" | "bool" | "choice" | "string" | "model_thresholds"
     lo: float | None = None
     hi: float | None = None
     choices: tuple[str, ...] = ()
@@ -162,6 +176,18 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="Which account-wide window(s) bind the switch decision",
         ),
         SettingSpec(
+            "autoswitch", "threshold5h", "threshold_5h", "optional_float", 1.0, 99.9,
+            help="5h gate; unset uses autoswitch.threshold. Any gate trips a switch",
+        ),
+        SettingSpec(
+            "autoswitch", "threshold7d", "threshold_7d", "optional_float", 1.0, 99.9,
+            help="Weekly (7d) gate; unset uses autoswitch.threshold",
+        ),
+        SettingSpec(
+            "autoswitch", "modelThresholds", "model_thresholds", "model_thresholds",
+            help="Per-model gates, e.g. Fable=40 or Fable=40,Opus=70 (each 1-99.9)",
+        ),
+        SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
             help="Color theme; auto follows the terminal background",
         ),
@@ -169,6 +195,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "ui", "view", "view", "choice",
             choices=("combined", "claude", "codex"),
             help="Dashboard view: both providers, or only one",
+        ),
+        SettingSpec(
+            "ui", "mask", "mask", "bool",
+            help="Mask account emails and organization names in the TUI",
         ),
         SettingSpec(
             "claude", "statusline", "statusline", "bool",
@@ -222,6 +252,173 @@ def parse_window_selection(value: str | None) -> tuple[str, ...]:
     return ("5h", "7d")
 
 
+def _pct_bounds() -> tuple[float, float]:
+    """Per-gate percentage bounds. Wider than ``autoswitch.threshold``
+    (floor 50) so a precious window such as Fable can trip earlier."""
+    spec = SETTING_SPECS["autoswitch.threshold5h"]
+    return float(spec.lo), float(spec.hi)
+
+
+def _format_pct(pct: float) -> str:
+    return str(int(pct)) if float(pct).is_integer() else str(pct)
+
+
+def parse_model_thresholds(value: str | None) -> tuple[tuple[str, float], ...]:
+    """Lenient ``"Fable=40, Opus=70"`` parse for load time.
+
+    Blank, malformed, and out-of-range pairs are dropped. Names are
+    case-insensitively deduped (first spelling wins). ``None`` and
+    non-strings yield nothing, so a garbage settings.json value disables
+    the extra gates instead of crashing ``ccswap auto``.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ()
+    lo, hi = _pct_bounds()
+    seen: dict[str, tuple[str, float]] = {}
+    for part in value.split(","):
+        if "=" not in part:
+            continue
+        name, raw = part.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            pct = float(raw.strip())
+        except ValueError:
+            continue
+        if not lo <= pct <= hi:
+            continue
+        key = name.lower()
+        if key not in seen:
+            seen[key] = (name, pct)
+    return tuple(seen.values())
+
+
+def format_model_thresholds(pairs: tuple[tuple[str, float], ...]) -> str:
+    return ",".join(f"{name}={_format_pct(pct)}" for name, pct in pairs)
+
+
+def with_model_threshold(
+    value: str | None, name: str, pct: float | None
+) -> str | None:
+    """``modelThresholds`` with one model's gate set, or removed when
+    ``pct`` is None. Other models stay, in their original order. None when
+    nothing remains."""
+    kept = [
+        (model, threshold)
+        for model, threshold in parse_model_thresholds(value)
+        if model.lower() != name.lower()
+    ]
+    if pct is not None:
+        kept.append((name, float(pct)))
+    if not kept:
+        return None
+    return format_model_thresholds(tuple(kept))
+
+
+def parse_model_thresholds_strict(raw_value: str) -> str:
+    """CLI parse: every pair must be ``Name=PCT`` inside the threshold band.
+
+    Returns the canonical ``Fable=40,Opus=70`` spelling.
+    """
+    value = raw_value.strip()
+    if not value:
+        raise ConfigError(
+            "autoswitch.modelThresholds expects Name=PCT pairs (e.g. Fable=40); "
+            "use 'ccswap config unset autoswitch.modelThresholds' to clear it"
+        )
+    lo, hi = _pct_bounds()
+    parsed: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for part in value.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        if "=" not in piece:
+            raise ConfigError(
+                "autoswitch.modelThresholds expects Name=PCT pairs "
+                f"(e.g. Fable=40), got '{piece}'"
+            )
+        name, raw = piece.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ConfigError(
+                "autoswitch.modelThresholds expects Name=PCT pairs "
+                f"(e.g. Fable=40), got '{piece}'"
+            )
+        try:
+            pct = float(raw.strip())
+        except ValueError:
+            raise ConfigError(
+                "autoswitch.modelThresholds expects a number after '=', "
+                f"got '{piece}'"
+            ) from None
+        if not lo <= pct <= hi:
+            raise ConfigError(
+                "autoswitch.modelThresholds percentages must be between "
+                f"{format_setting_value(lo)} and {format_setting_value(hi)}, "
+                f"got '{piece}'"
+            )
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed.append((name, pct))
+    if not parsed:
+        raise ConfigError(
+            "autoswitch.modelThresholds expects Name=PCT pairs (e.g. Fable=40)"
+        )
+    return format_model_thresholds(tuple(parsed))
+
+
+def effective_model_names(settings: AutoSwitchSettings) -> tuple[str, ...]:
+    """Models whose weekly window binds a decision.
+
+    The union of ``autoswitch.model`` and every name in
+    ``autoswitch.modelThresholds``, so ``Fable=40`` alone is enough to watch
+    Fable — the shared ``model`` list is not a second switch that has to be
+    set in lockstep.
+    """
+    names = list(parse_model_names(settings.model))
+    seen = {name.lower() for name in names}
+    for name, _pct in parse_model_thresholds(settings.model_thresholds):
+        if name.lower() not in seen:
+            names.append(name)
+            seen.add(name.lower())
+    return tuple(names)
+
+
+@dataclass(frozen=True)
+class GateThresholds:
+    """Per-window switch thresholds. Missing labels inherit ``default``.
+
+    ``overrides`` is keyed by lowercased label (``"5h"``, ``"7d"``, or a
+    model display name). Entries equal to ``default`` are omitted, so "no
+    overrides" means every gate shares one number and the engine's existing
+    headroom math applies unchanged.
+    """
+
+    default: float
+    overrides: dict[str, float]
+
+    def for_label(self, label: str) -> float:
+        return self.overrides.get(label.lower(), self.default)
+
+
+def gate_thresholds(settings: AutoSwitchSettings) -> GateThresholds:
+    """Effective per-gate thresholds for one settings snapshot."""
+    default = float(settings.threshold)
+    overrides: dict[str, float] = {}
+    if settings.threshold_5h is not None:
+        overrides["5h"] = float(settings.threshold_5h)
+    if settings.threshold_7d is not None:
+        overrides["7d"] = float(settings.threshold_7d)
+    for name, pct in parse_model_thresholds(settings.model_thresholds):
+        overrides[name.lower()] = float(pct)
+    overrides = {key: pct for key, pct in overrides.items() if pct != default}
+    return GateThresholds(default, overrides)
+
+
 def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
     """Clamp values into the SETTING_SPECS ranges; bad types → the default."""
 
@@ -244,6 +441,16 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
             # A non-empty string keeps as-is; anything else reverts to default
             # (None) so a null/garbage settings.json value disables the filter.
             kwargs[spec.field] = value if isinstance(value, str) and value else spec.default
+        elif spec.kind == "optional_float":
+            # None inherits autoswitch.threshold. A bad type does too, rather
+            # than crashing; an out-of-range number clamps like the other pcts.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                kwargs[spec.field] = None
+            else:
+                kwargs[spec.field] = float(min(max(float(value), spec.lo), spec.hi))
+        elif spec.kind == "model_thresholds":
+            pairs = parse_model_thresholds(value if isinstance(value, str) else None)
+            kwargs[spec.field] = format_model_thresholds(pairs) if pairs else None
         else:  # choice
             if value not in spec.choices:
                 _logger.warning(
@@ -307,7 +514,14 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
             view, default.view,
         )
         view = default.view
-    return UiSettings(theme=theme, view=view)
+    mask = section.get("mask", default.mask)
+    if not isinstance(mask, bool):
+        _logger.warning(
+            "settings.json: unsupported ui.mask %r; using %r",
+            mask, default.mask,
+        )
+        mask = default.mask
+    return UiSettings(theme=theme, view=view, mask=mask)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -371,10 +585,13 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
                 f"'ccswap config unset {spec.dotted}' to clear it"
             )
         return value
+    if spec.kind == "model_thresholds":
+        return parse_model_thresholds_strict(raw_value)
+    kind = "float" if spec.kind == "optional_float" else spec.kind
     try:
-        value = int(raw_value) if spec.kind == "int" else float(raw_value)
+        value = int(raw_value) if kind == "int" else float(raw_value)
     except ValueError:
-        noun = "an integer" if spec.kind == "int" else "a number"
+        noun = "an integer" if kind == "int" else "a number"
         raise ConfigError(
             f"{spec.dotted} expects {noun}, got '{raw_value}'"
         ) from None
@@ -510,6 +727,9 @@ def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
         ("include_api_key_accounts", "include_api_key_accounts"),
         ("model", "model"),
         ("strategy", "strategy"),
+        ("threshold_5h", "threshold_5h"),
+        ("threshold_7d", "threshold_7d"),
+        ("model_thresholds", "model_thresholds"),
     ):
         value = getattr(args, attr, None)
         if value is not None:

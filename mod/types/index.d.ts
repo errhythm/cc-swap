@@ -1,5 +1,16 @@
 export type CcswapWindow = { pct: number; countdown: string | null }
 
+export type CcswapScoped = { name: string; pct: number }
+
+export type CcswapGates = {
+  threshold: number
+  threshold5h: number | null
+  threshold7d: number | null
+  windows: string
+  models: string[]
+  modelThresholds: Record<string, number>
+}
+
 export type CcswapAccount = {
   number: number
   email: string
@@ -7,11 +18,13 @@ export type CcswapAccount = {
   status: string
   fiveHour: CcswapWindow | null
   sevenDay: CcswapWindow | null
+  scoped: CcswapScoped[]
 }
 
 export type CcswapSnapshot = {
   active: number | null
   threshold: number
+  gates: CcswapGates
   accounts: CcswapAccount[]
   error: string | null
 }
@@ -31,6 +44,9 @@ export type CcswapHistoryView = { entries: CcswapSwitchEntry[]; error: string | 
 
 export type CcswapSettingsView = {
   threshold: number
+  threshold5h: number | null
+  threshold7d: number | null
+  modelThresholds: string | null
   strategy: string
   windows: string
   statusline: boolean

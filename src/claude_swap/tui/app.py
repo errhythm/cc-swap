@@ -21,7 +21,13 @@ from claude_swap import printer
 from claude_swap.codex import CodexAccountSwitcher
 from claude_swap.models import AccountsSnapshot
 from claude_swap.snapshot_source import account_identity
-from claude_swap.settings import load_settings, load_ui_settings, set_setting
+from claude_swap.settings import (
+    load_settings,
+    load_ui_settings,
+    set_setting,
+    unset_setting,
+    with_model_threshold,
+)
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import AccountListScreen, DashboardScreen, WatchScreen
@@ -31,6 +37,8 @@ from claude_swap.tui.data import (
     ActionResult,
     SnapshotSource,
     format_duration,
+    mask_email,
+    mask_emails_in_text,
     run_action,
 )
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
@@ -46,7 +54,12 @@ class CswapApp(App):
     # No command palette: actions live in the dashboard's nested menu, in
     # their own context — not in a global searchable list.
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = [Binding("ctrl+t", "toggle_theme", "Theme")]
+    BINDINGS = [
+        Binding("ctrl+t", "toggle_theme", "Theme"),
+        # Description is rewritten to "Mask on" / "Mask off" so the footer
+        # shows the live state, not just the key.
+        Binding("m", "toggle_mask", "Mask off"),
+    ]
 
     POLL_INTERVAL_S = 3.0  # matches the old watch view's recapture cadence
     # Snapshot age stays hidden while polling is healthy (age never exceeds
@@ -67,6 +80,9 @@ class CswapApp(App):
     # file descriptors contend, recreating the lock-timeout/deadlock class the
     # app-level single-flight is meant to prevent.
     busy: reactive[bool] = reactive(False)
+    # Display-only. Slot numbers and aliases stay readable so a masked
+    # dashboard, watch page, and auto-switch view can still be operated.
+    mask_accounts: reactive[bool] = reactive(False)
 
     def __init__(
         self,
@@ -109,16 +125,24 @@ class CswapApp(App):
             settings = load_settings(switcher.backup_dir)
             self.threshold_pct: float | None = settings.threshold
             self._strategy_name = settings.strategy
+            self._threshold_5h: float | None = settings.threshold_5h
+            self._threshold_7d: float | None = settings.threshold_7d
+            self._model_thresholds: str | None = settings.model_thresholds
         except Exception:
             self.threshold_pct = None
             self._strategy_name = "best"
+            self._threshold_5h = None
+            self._threshold_7d = None
+            self._model_thresholds = None
         try:
             ui_settings = load_ui_settings(switcher.backup_dir)
             self._theme_name = ui_settings.theme
             self._view = ui_settings.view
+            self.mask_accounts = ui_settings.mask
         except Exception:
             self._theme_name = "auto"
             self._view = "combined"
+            self.mask_accounts = False
 
     def switcher_for(self, provider: str):
         """Return a switcher only when its provider is explicit."""
@@ -134,6 +158,9 @@ class CswapApp(App):
         # We own the theme; $TEXTUAL_THEME is intentionally not honoured.
         self.theme = f"cswap-{resolved}"
         printer.set_theme(resolved)
+        # Before any footer composes, so the first paint already says
+        # "Mask on" when ui.mask was saved.
+        self._sync_mask_binding()
         self.push_screen(DashboardScreen())
         if self._start == "watch":
             # Stacked over the dashboard so Esc lands there, not on exit.
@@ -347,6 +374,8 @@ class CswapApp(App):
     ) -> None:
         self.busy = False
         self.request_refresh()
+        if self.mask_accounts and result.output:
+            result = replace(result, output=mask_emails_in_text(result.output))
         if not result.ok:
             self.push_screen(OutputModal(f"{label} — failed", result.output))
             return
@@ -354,7 +383,11 @@ class CswapApp(App):
         if "switched" in payload:
             if payload.get("switched"):
                 to = payload.get("to") or {}
-                target = to.get("email") or f"account {to.get('number')}"
+                email = to.get("email") or ""
+                if email:
+                    target = mask_email(email) if self.mask_accounts else email
+                else:
+                    target = f"account {to.get('number')}"
                 self.notify(f"Switched to {target}", title="Switch")
             else:
                 reason = str(payload.get("reason") or "no switch performed")
@@ -400,9 +433,10 @@ class CswapApp(App):
         )
 
     def confirm_remove(self, provider: str, number: str, email: str) -> None:
+        shown = mask_email(email) if self.mask_accounts and email else email
         self.push_screen(
             ConfirmModal(
-                f"Remove account {number} ({email})?\n\n"
+                f"Remove account {number} ({shown})?\n\n"
                 "Its stored credentials and config backup are deleted.",
                 title="Remove account",
                 yes_label="Remove",
@@ -488,7 +522,7 @@ class CswapApp(App):
         # never trigger an overwrite warning here.
         for acc in snapshot.accounts:
             if acc.number == str(slot):
-                return acc.email
+                return mask_email(acc.email) if self.mask_accounts else acc.email
         return None
 
     # -- navigation -------------------------------------------------------------
@@ -591,6 +625,37 @@ class CswapApp(App):
         except Exception as exc:  # persistence is best-effort; never crash the UI
             self.notify(f"Could not save auto-switch threshold: {exc}", severity="warning")
 
+    def apply_window_gate(self, which: str, value: float | None) -> None:
+        """Persist the 5h or weekly gate. None inherits the shared threshold."""
+        if which == "5h":
+            self._threshold_5h = value
+            dotted = "autoswitch.threshold5h"
+            label = "5h gate"
+        else:
+            self._threshold_7d = value
+            dotted = "autoswitch.threshold7d"
+            label = "weekly gate"
+        self._write_optional_setting(dotted, None if value is None else str(value), label)
+
+    def apply_fable_gate(self, value: float | None) -> None:
+        """Persist Fable's gate, keeping any other model thresholds."""
+        self._model_thresholds = with_model_threshold(
+            self._model_thresholds, "Fable", value
+        )
+        self._write_optional_setting(
+            "autoswitch.modelThresholds", self._model_thresholds, "Fable gate"
+        )
+
+    def _write_optional_setting(self, dotted: str, value: str | None, label: str) -> None:
+        try:
+            root = self.switcher_for("claude").backup_dir
+            if value is None:
+                unset_setting(root, dotted)
+            else:
+                set_setting(root, dotted, value)
+        except Exception as exc:  # persistence is best-effort; never crash the UI
+            self.notify(f"Could not save {label}: {exc}", severity="warning")
+
     def apply_strategy(self, name: str) -> None:
         """Persist the selection for the next AutoScreen engine."""
         self._strategy_name = name
@@ -602,3 +667,49 @@ class CswapApp(App):
             )
         except Exception as exc:  # persistence is best-effort; never crash the UI
             self.notify(f"Could not save auto-switch strategy: {exc}", severity="warning")
+
+    def apply_mask(self, on: bool) -> None:
+        """Hide or show account emails and organization names.
+
+        Cards, the watch title, and the auto-switch view follow the
+        ``mask_accounts`` reactive. Open menus keep a copy of the label
+        from when they were built, so the keybinding refreshes those.
+        """
+        self.mask_accounts = bool(on)
+        self._sync_mask_binding()
+        try:
+            set_setting(
+                self.switcher_for("claude").backup_dir,
+                "ui.mask",
+                "on" if on else "off",
+            )
+        except Exception as exc:  # persistence is best-effort; never crash the UI
+            self.notify(f"Could not save account masking: {exc}", severity="warning")
+
+    def _sync_mask_binding(self) -> None:
+        """Keep the bottom-bar key label equal to the current mask state."""
+        label = "Mask on" if self.mask_accounts else "Mask off"
+        current = self._bindings.key_to_bindings.get("m", [])
+        updated = [
+            replace(binding, description=label, show=True)
+            if binding.action == "toggle_mask"
+            else binding
+            for binding in current
+        ]
+        if not any(binding.action == "toggle_mask" for binding in updated):
+            updated.append(Binding("m", "toggle_mask", label, show=True))
+        self._bindings.key_to_bindings["m"] = updated
+        if self._is_mounted:
+            for screen in self.screen_stack:
+                screen.refresh_bindings()
+
+    def action_toggle_mask(self) -> None:
+        self.apply_mask(not self.mask_accounts)
+        self.notify(
+            "Account info masked" if self.mask_accounts else "Account info visible",
+            timeout=2,
+        )
+        for screen in self.screen_stack:
+            refresh = getattr(screen, "refresh_masked_labels", None)
+            if refresh is not None:
+                refresh()

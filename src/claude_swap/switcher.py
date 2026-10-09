@@ -86,8 +86,9 @@ from claude_swap.paths import (
 from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
 from claude_swap.settings import (
+    effective_model_names,
+    gate_thresholds,
     load_settings,
-    parse_model_names,
     parse_window_selection,
     settings_path,
 )
@@ -352,14 +353,21 @@ class ClaudeAccountSwitcher:
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
         self._usage_store = UsageStore(self.backup_dir / "cache")
-        # (settings mtime, (threshold, models, account_windows)) — see
-        # _poll_policy_inputs.
+        # (settings mtime, (threshold, models, account_windows, gate overrides))
+        # — see _load_poll_inputs. Gate overrides are lowercased label → pct
+        # for windows that do NOT inherit autoswitch.threshold.
         self._poll_inputs_cache: (
-            tuple[float | None, tuple[float, tuple[str, ...], tuple[str, ...]]] | None
+            tuple[
+                float | None,
+                tuple[float, tuple[str, ...], tuple[str, ...], dict[str, float]],
+            ]
+            | None
         ) = None
         self._poll_inputs_override: (
             tuple[float, tuple[str, ...], tuple[str, ...]] | None
         ) = None
+        # None = not pinned (read the file). {} = pinned, no per-gate overrides.
+        self._poll_gate_overrides: dict[str, float] | None = None
 
         # The credential storage layer (active + per-account backup stores, macOS
         # Keychain-vs-file routing, the per-process capability cache). Reads its
@@ -1821,11 +1829,17 @@ class ClaudeAccountSwitcher:
         threshold: float,
         models: tuple[str, ...],
         account_windows: tuple[str, ...] = ("5h", "7d"),
+        gate_thresholds: dict[str, float] | None = None,
     ) -> None:
         """Pin the threshold/models/account_windows poll planning keys on (set
         by a hosted auto engine so cadence follows its effective, CLI-merged
-        settings instead of the settings file)."""
+        settings instead of the settings file).
+
+        ``gate_thresholds`` is the lowercased label → pct map of gates that
+        do not inherit ``threshold`` (empty/None = every gate shares it).
+        """
         self._poll_inputs_override = (threshold, models, account_windows)
+        self._poll_gate_overrides = dict(gate_thresholds or {})
 
     def clear_poll_policy_inputs(self) -> None:
         """Drop the hosted engine's pin so poll planning falls back to the
@@ -1833,14 +1847,21 @@ class ClaudeAccountSwitcher:
         session threshold override would keep steering cadence after the
         engine it belonged to is gone."""
         self._poll_inputs_override = None
+        self._poll_gate_overrides = None
 
-    def _poll_policy_inputs(self) -> tuple[float, tuple[str, ...], tuple[str, ...]]:
-        """Threshold + configured model names + account-window selection for
-        poll planning: the hosting engine's pinned values when present, else
-        the settings file (reloaded only when it changes — one stat per
-        pass)."""
+    def _load_poll_inputs(
+        self,
+    ) -> tuple[float, tuple[str, ...], tuple[str, ...], dict[str, float]]:
+        """Threshold, model names, account windows, and per-gate overrides.
+
+        The hosting engine's pin wins when present; otherwise the settings
+        file, reloaded only when it changes (one stat per pass). Model names
+        include ``autoswitch.modelThresholds`` so a Fable gate is visible to
+        cadence and to the 429-stale trust bound, not only to the engine.
+        """
         if self._poll_inputs_override is not None:
-            return self._poll_inputs_override
+            threshold, models, windows = self._poll_inputs_override
+            return threshold, models, windows, dict(self._poll_gate_overrides or {})
         path = settings_path(self.backup_dir)
         try:
             mtime: float | None = path.stat().st_mtime
@@ -1851,11 +1872,25 @@ class ClaudeAccountSwitcher:
         loaded = load_settings(self.backup_dir)
         inputs = (
             loaded.threshold,
-            parse_model_names(loaded.model),
+            effective_model_names(loaded),
             parse_window_selection(loaded.windows),
+            gate_thresholds(loaded).overrides,
         )
         self._poll_inputs_cache = (mtime, inputs)
         return inputs
+
+    def _poll_policy_inputs(self) -> tuple[float, tuple[str, ...], tuple[str, ...]]:
+        """Threshold + configured model names + account-window selection for
+        poll planning: the hosting engine's pinned values when present, else
+        the settings file (reloaded only when it changes — one stat per
+        pass)."""
+        threshold, models, windows, _gates = self._load_poll_inputs()
+        return threshold, models, windows
+
+    def _poll_gate_overrides_map(self) -> dict[str, float]:
+        """Per-gate thresholds that do not inherit ``autoswitch.threshold``."""
+        _threshold, _models, _windows, gates = self._load_poll_inputs()
+        return gates
 
     def switchable_account_numbers(self) -> list[str]:
         """Account numbers in rotation order eligible for automatic selection.
@@ -5244,7 +5279,7 @@ class ClaudeAccountSwitcher:
         # of autoswitch.windows: excluding a window here would make polling
         # itself blind to it, not just the switch decision, and users can
         # still see the ignored window's usage in `ccswap list`.
-        threshold, models, _account_windows = self._poll_policy_inputs()
+        threshold, models, _account_windows, gate_overrides = self._load_poll_inputs()
         plans: dict[str, tuple[float | None, float | None]] = {}
         for num, rec in records.items():
             if rec.sentinel is not None or rec.error is not None:
@@ -5260,6 +5295,7 @@ class ClaudeAccountSwitcher:
                 models=models,
                 recent_429=recent_429,
                 now=now,
+                gate_thresholds=gate_overrides or None,
             )
         return plans
 

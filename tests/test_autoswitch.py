@@ -6984,3 +6984,111 @@ class TestFreshenRoutesThroughGate:
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
 
+
+def _windows(five_h: float, seven_d: float, fable: float | None = None) -> dict:
+    usage: dict = {"five_hour": {"pct": five_h}, "seven_day": {"pct": seven_d}}
+    if fable is not None:
+        usage["scoped"] = [{"name": "Fable", "pct": fable}]
+    return usage
+
+
+class TestPerGateThresholds:
+    """5h, weekly, and Fable each have their own wall. Any one trips a switch."""
+
+    def _seed(self, temp_home: Path, **kw) -> EngineHarness:
+        h = EngineHarness(temp_home, **kw)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
+        return h
+
+    def test_weekly_gate_trips_below_the_shared_threshold(self, temp_home):
+        h = self._seed(temp_home, threshold_7d=60.0)
+        outcome = h.tick_with_usage({
+            "1": _windows(10, 70),
+            "2": _windows(10, 10),
+            "3": _windows(20, 20),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_a_high_weekly_reading_holds_when_its_gate_is_higher(self, temp_home):
+        # 7d at 96% would trip the shared 90% line. Its own gate is 99, and
+        # 5h at 92 is under its own 95, so this account stays.
+        h = self._seed(temp_home, threshold_5h=95.0, threshold_7d=99.0)
+        outcome = h.tick_with_usage({
+            "1": _windows(92, 96),
+            "2": _windows(10, 10),
+            "3": _windows(20, 20),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["below-threshold"]
+
+    def test_fable_gate_trips_without_autoswitch_model(self, temp_home):
+        h = self._seed(temp_home, model_thresholds="Fable=40")
+        outcome = h.tick_with_usage({
+            "1": _windows(5, 5, 45),
+            "2": _windows(5, 5, 10),
+            "3": _windows(20, 20, 20),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        reasons = [e for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert not any(e.reason == "below-threshold" for e in reasons)
+
+    def test_fable_under_its_own_gate_does_not_trip_the_shared_line(self, temp_home):
+        h = self._seed(temp_home, model="Fable", model_thresholds="Fable=95")
+        outcome = h.tick_with_usage({
+            "1": _windows(10, 10, 92),
+            "2": _windows(5, 5, 10),
+            "3": _windows(20, 20, 20),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        detail = next(e.detail for e in h.events if isinstance(e, NoSwitchEvent))
+        assert detail == "Fable 92% < 95%"
+
+    @pytest.mark.parametrize("active", [
+        _windows(85, 10, 10),  # 5h
+        _windows(10, 75, 10),  # weekly
+        _windows(10, 10, 55),  # Fable
+    ])
+    def test_each_gate_trips_on_its_own(self, temp_home, active):
+        h = self._seed(
+            temp_home, threshold_5h=80.0, threshold_7d=70.0, model_thresholds="Fable=50",
+        )
+        outcome = h.tick_with_usage({
+            "1": active,
+            "2": _windows(10, 10, 10),
+            "3": _windows(20, 20, 20),
+        })
+        assert outcome is TickOutcome.SWITCHED, active
+        assert h.active_number() == 2
+
+    def test_does_not_land_on_a_tripped_fable_gate(self, temp_home):
+        # Peer 2 has more raw headroom (max pct 45) but is over its Fable
+        # gate. Peer 3 is the one that is actually usable.
+        h = self._seed(temp_home, model_thresholds="Fable=40")
+        outcome = h.tick_with_usage({
+            "1": _windows(95, 10, 10),
+            "2": _windows(10, 10, 45),
+            "3": _windows(50, 50, 10),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_ranks_by_slack_to_the_nearest_gate(self, temp_home):
+        # Peer 2 wins on raw headroom (max pct 45 → 55 left) but is 5 points
+        # from its weekly gate. Peer 3 has less raw headroom and 30 points
+        # of slack. The switch goes to 3.
+        h = self._seed(temp_home, threshold_7d=50.0)
+        outcome = h.tick_with_usage({
+            "1": _windows(95, 10),
+            "2": _windows(10, 45),
+            "3": _windows(60, 10),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+

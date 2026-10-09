@@ -34,8 +34,11 @@ from claude_swap.codex_autoswitch import CodexAutoSwitchEngine
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import (
     SETTING_SPECS,
+    effective_model_names,
+    gate_thresholds,
     load_settings,
     parse_model_names,
+    parse_model_thresholds,
     parse_window_selection,
 )
 from claude_swap.tui import data
@@ -55,16 +58,23 @@ _EVENT_ROLES = {
 _QUIET_KINDS = {"poll", "no-switch", "sleep", "account-unquarantined"}
 
 
-def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Text:
-    """Log line for one engine event, styled like the CLI's human renderer."""
+def event_text(
+    event: AutoSwitchEvent, *, palette: Palette = Palette.DARK, mask: bool = False
+) -> Text:
+    """Log line for one engine event, styled like the CLI's human renderer.
+
+    ``mask`` redacts mailboxes in the human line only. The engine's own
+    ``human()`` stays intact for the CLI.
+    """
     role = _EVENT_ROLES.get(event.kind)
     if role is not None:
         style = getattr(palette, role)
     else:
         style = palette.muted if event.kind in _QUIET_KINDS else palette.foreground
+    body = data.mask_emails_in_text(event.human()) if mask else event.human()
     text = Text()
     text.append(f"{data.clock_stamp()}  ", style=palette.muted)
-    text.append(event.human(), style=style)
+    text.append(body, style=style)
     return text
 
 
@@ -93,6 +103,9 @@ class AutoScreen(Screen):
         self._adjusting = False
         self._configured_threshold: float | None = None
         self._entry_threshold: float | None = None
+        # Notes and events, so toggling the mask can redraw the log. The
+        # engine does not keep a transcript of its own.
+        self._log_items: list[tuple[str, str | AutoSwitchEvent]] = []
 
     def compose(self) -> ComposeResult:
         yield AccountsPanel(
@@ -123,6 +136,7 @@ class AutoScreen(Screen):
         self._update_summary()
         self.watch(self.app, "snapshots", self._on_snapshots)
         self.watch(self.app, "theme", self._on_theme_change)
+        self.watch(self.app, "mask_accounts", self._on_mask_change)
         self._start_engine(dry_run=True)
 
     def on_unmount(self) -> None:
@@ -183,12 +197,9 @@ class AutoScreen(Screen):
             return  # no net change: nothing to announce, no tick to force
         if self._engine is not None:
             self._engine.wake()  # show a decision at the new value now
-        self.query_one("#event-log", RichLog).write(
-            Text(
-                f"— threshold set to {pct_label(self._settings.threshold)}% "
-                "for this session —",
-                style=Palette.from_theme(self.app.current_theme).muted,
-            )
+        self._log_note(
+            f"— threshold set to {pct_label(self._settings.threshold)}% "
+            "for this session —"
         )
 
     def _set_threshold(self, value: float) -> None:
@@ -209,9 +220,20 @@ class AutoScreen(Screen):
             f"threshold {pct_label(self._settings.threshold)}%",
             style=palette.accent if self._adjusting else "",
         )
+        gates = []
+        if self._settings.threshold_5h is not None:
+            gates.append(f"5h {pct_label(self._settings.threshold_5h)}%")
+        if self._settings.threshold_7d is not None:
+            gates.append(f"7d {pct_label(self._settings.threshold_7d)}%")
+        for name, pct in parse_model_thresholds(self._settings.model_thresholds):
+            gates.append(f"{name} {pct_label(pct)}%")
+        if gates:
+            text.append(" · " + " ".join(gates))
         if self._settings.threshold != self._configured_threshold:
             text.append(" (session)", style=palette.muted)
         text.append(f" · poll every {self._settings.interval_seconds:.0f}s")
+        if self.app.mask_accounts:
+            text.append(" · masked", style=palette.muted)
         if self._adjusting:
             text.append("   ← → adjust · enter done", style=palette.muted)
         self.query_one("#auto-summary", Static).update(text)
@@ -235,14 +257,8 @@ class AutoScreen(Screen):
             name=f"auto-engine-{'dry' if dry_run else 'live'}",
         )
         self._update_badge()
-        log = self.query_one("#event-log", RichLog)
         mode = "DRY-RUN (watching only)" if dry_run else "LIVE (will switch accounts)"
-        log.write(
-            Text(
-                f"— engine started: {mode} —",
-                style=Palette.from_theme(self.app.current_theme).muted,
-            )
-        )
+        self._log_note(f"— engine started: {mode} —")
 
     def _emit_from_thread(self, event: AutoSwitchEvent) -> None:
         """Engine ``on_event`` callback — runs on the worker thread."""
@@ -255,10 +271,42 @@ class AutoScreen(Screen):
     def _on_engine_event(self, event: AutoSwitchEvent) -> None:
         if not self.is_attached:
             return
-        palette = Palette.from_theme(self.app.current_theme)
-        self.query_one("#event-log", RichLog).write(event_text(event, palette=palette))
+        self._log_items.append(("event", event))
+        self._write_log_item(("event", event))
         if event.kind == "switch":
             self.app.request_refresh(self.provider)
+
+    def _log_note(self, note: str) -> None:
+        item: tuple[str, str | AutoSwitchEvent] = ("note", note)
+        self._log_items.append(item)
+        self._write_log_item(item)
+
+    def _write_log_item(self, item: tuple[str, str | AutoSwitchEvent]) -> None:
+        if not self.is_mounted:
+            return
+        palette = Palette.from_theme(self.app.current_theme)
+        kind, payload = item
+        log = self.query_one("#event-log", RichLog)
+        if kind == "note":
+            log.write(Text(str(payload), style=palette.muted))
+            return
+        assert isinstance(payload, AutoSwitchEvent)
+        log.write(
+            event_text(payload, palette=palette, mask=self.app.mask_accounts)
+        )
+
+    def _repaint_log(self) -> None:
+        if not self.is_mounted:
+            return
+        log = self.query_one("#event-log", RichLog)
+        log.clear()
+        for item in self._log_items:
+            self._write_log_item(item)
+
+    def _on_mask_change(self, _on: bool) -> None:
+        self._update_summary()
+        self._on_snapshot(self.app.snapshots[self.provider])
+        self._repaint_log()
 
     def action_toggle_live(self) -> None:
         if self._engine is None:
@@ -317,7 +365,13 @@ class AutoScreen(Screen):
         # autoswitch.windows included), so the displayed ranking can never
         # disagree with the account it picks.
         palette = Palette.from_theme(self.app.current_theme)
-        models = parse_model_names(self._settings.model) if self._settings else ()
+        claude = self.provider == "claude" and self._settings is not None
+        if claude:
+            models = effective_model_names(self._settings)
+            overrides = gate_thresholds(self._settings).overrides
+        else:
+            models = parse_model_names(self._settings.model) if self._settings else ()
+            overrides = {}
         windows = (
             parse_window_selection(self._settings.windows)
             if self._settings
@@ -328,10 +382,19 @@ class AutoScreen(Screen):
         for acc in snap.accounts:
             if acc.number == active_number or not acc.switchable:
                 continue
-            pct = binding_pct(acc.usage.last_good, models, windows)
+            pct = binding_pct(
+                acc.usage.last_good,
+                models,
+                windows,
+                gate_thresholds=overrides or None,
+                default_threshold=self._settings.threshold if claude and overrides else None,
+            )
             entry = Text()
             entry.append(f"\n  {acc.number:>2}  ", style=palette.foreground)
-            entry.append(acc.email, style=palette.foreground)
+            entry.append(
+                data.present_email(acc.email, mask=self.app.mask_accounts),
+                style=palette.foreground,
+            )
             if acc.usage.sentinel is not None:
                 entry.append(
                     f"  {data.sentinel_label(acc.usage.sentinel)}", style=palette.muted

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +30,94 @@ from claude_swap.switcher import SENTINEL_NOTES, last_seen_note
 
 PROVIDERS = ("claude", "codex")
 PROVIDER_LABELS = {"claude": "Claude Code", "codex": "Codex"}
+
+# Plan labels and the personal fallback are not an account's identity.
+# Organization names are, so masking leaves only the generic tags alone.
+_PLAIN_TAGS = frozenset({"personal"})
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def mask_name(name: str) -> str:
+    """Mask a display name, keeping only each word's first character."""
+    parts: list[str] = []
+    for part in name.split():
+        if len(part) <= 1:
+            parts.append("•")
+        else:
+            parts.append(part[0] + "•" * min(3, len(part) - 1))
+    return " ".join(parts) if parts else name
+
+
+def _mask_local(local: str) -> str:
+    n = len(local)
+    if n <= 1:
+        return "•"
+    if n == 2:
+        return local[0] + "•"
+    return local[0] + "•" * min(3, n - 2) + local[-1]
+
+
+def _mask_domain(domain: str) -> str:
+    if not domain:
+        return "•"
+    head, dot, tail = domain.partition(".")
+    if len(head) <= 1:
+        masked = "•"
+    else:
+        masked = head[0] + "•" * min(3, len(head) - 1)
+    return f"{masked}.{tail}" if dot else masked
+
+
+def mask_email(email: str) -> str:
+    """Redact a mailbox but keep enough shape to tell accounts apart.
+
+    ``alice@acme.com`` becomes ``a•••e@a•••.com``: the local part keeps its
+    first and last character (so ``user1`` and ``user2`` still differ) and
+    only the first domain label is hidden. A value with no ``@`` is masked
+    as a name.
+    """
+    raw = email.strip()
+    if not raw:
+        return raw
+    if "@" not in raw:
+        return mask_name(raw)
+    local, domain = raw.rsplit("@", 1)
+    return f"{_mask_local(local)}@{_mask_domain(domain)}"
+
+
+def mask_emails_in_text(text: str) -> str:
+    """Replace email addresses in free text (event log, captured CLI output)."""
+    return _EMAIL_RE.sub(lambda match: mask_email(match.group(0)), text)
+
+
+def present_email(email: str, *, mask: bool) -> str:
+    return mask_email(email) if mask and email else email
+
+
+def present_alias(alias: str, *, mask: bool) -> str:
+    """Aliases stay visible — they are the local nickname — unless one is an email."""
+    if mask and alias and "@" in alias:
+        return mask_email(alias)
+    return alias
+
+
+def present_tag(tag: str, *, mask: bool) -> str:
+    """Mask organization names; leave ``personal`` and Codex plan labels."""
+    if not mask or not tag:
+        return tag
+    lowered = tag.lower()
+    if lowered in _PLAIN_TAGS or lowered == "codex" or lowered.startswith("codex "):
+        return tag
+    return mask_name(tag)
+
+
+def account_label(alias: str, email: str, *, mask: bool) -> str:
+    """``alias (email)`` or just the email, both sides already masked."""
+    shown_email = present_email(email, mask=mask)
+    shown_alias = present_alias(alias, mask=mask)
+    if shown_alias:
+        return f"{shown_alias} ({shown_email})"
+    return shown_email
 
 
 def iter_accounts(
@@ -199,9 +288,16 @@ def clock_stamp() -> str:
 __all__ = [
     "ActionResult",
     "SnapshotSource",
+    "account_label",
     "format_age",
     "format_duration",
     "last_seen_note",
+    "mask_email",
+    "mask_emails_in_text",
+    "mask_name",
+    "present_alias",
+    "present_email",
+    "present_tag",
     "reset_clock",
     "reset_text",
     "run_action",

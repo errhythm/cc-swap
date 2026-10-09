@@ -313,3 +313,41 @@ class TestBudgetInvariants:
         # (which absorbs any overshoot) is considered.
         polls = poll_policy.ESCALATION_MARGIN_PCT / poll_policy.MOVEMENT_DELTA_PCT
         assert polls < 27
+
+
+class TestPerGateUrgent:
+    def test_fable_gate_goes_urgent_while_the_session_window_is_idle(self):
+        # 5h stays at 5%. Fable's own threshold is 50, and it moves 30→40,
+        # inside that gate's escalation band. The shared 90% line would not
+        # even notice.
+        usage = lambda fable: {
+            "five_hour": {"pct": 5.0},
+            "seven_day": {"pct": 0.0},
+            "scoped": [{"name": "Fable", "pct": fable}],
+        }
+        _, interval = _plan(
+            prev_interval_s=poll_policy.MIN_INTERVAL_S,
+            prev_usage=usage(30),
+            new_usage=usage(40),
+            is_active=True,
+            threshold=90.0,
+            models=("Fable",),
+            gate_thresholds={"fable": 50.0},
+        )
+        assert interval == poll_policy.URGENT_INTERVAL_S
+
+    def test_without_the_gate_the_same_fable_move_is_not_urgent(self):
+        usage = lambda fable: {
+            "five_hour": {"pct": 5.0},
+            "seven_day": {"pct": 0.0},
+            "scoped": [{"name": "Fable", "pct": fable}],
+        }
+        _, interval = _plan(
+            prev_interval_s=poll_policy.MIN_INTERVAL_S,
+            prev_usage=usage(30),
+            new_usage=usage(40),
+            is_active=True,
+            threshold=90.0,
+            models=("Fable",),
+        )
+        assert interval > poll_policy.URGENT_INTERVAL_S
