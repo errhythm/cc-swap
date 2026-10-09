@@ -57,7 +57,6 @@ const TABS: { id: CcswapTab; label: string; hotkey: string }[] = [
 // What each Settings press moves to next.
 const THRESHOLDS = [70, 80, 85, 90, 95]
 const GATE_PCTS: (number | null)[] = [null, 70, 80, 85, 90, 95]
-const FABLE_GATES = [null, 'Fable=70', 'Fable=80', 'Fable=85', 'Fable=90', 'Fable=95']
 const STRATEGIES = ['best', 'consume-first']
 const WINDOWS = ['both', '5h', '7d']
 
@@ -367,6 +366,22 @@ function nextOf<T>(list: readonly T[], current: T): T {
   return list[(i + 1) % list.length]!
 }
 
+/** Next `modelThresholds` after one press of the Fable row.
+ *
+ * Only Fable moves along `GATE_PCTS` (inherit, then 70–95). Other models stay,
+ * in their original order. A Fable percentage that is not one of those stops
+ * steps onto the ladder. Null when nothing remains, which unsets the key.
+ */
+export function nextFableThresholds(current: string | null): string | null {
+  const parts = (current ?? '').split(',').map(part => part.trim()).filter(Boolean)
+  const others = parts.filter(part => part.split('=')[0]!.trim().toLowerCase() !== 'fable')
+  const currentPct = parseModelThresholds(current).fable
+  const onLadder = currentPct !== undefined && GATE_PCTS.includes(currentPct)
+  const next = nextOf(GATE_PCTS, onLadder ? currentPct : null)
+  const merged = next === null ? others : [...others, `Fable=${next}`]
+  return merged.length ? merged.join(',') : null
+}
+
 /** `ccswap config set` or `unset` (null), then re-reads the Settings tab. */
 async function setSetting($: $, key: string, value: string | null): Promise<void> {
   const out = value === null
@@ -609,7 +624,7 @@ export const register: Register = on => {
           return setSetting($, 'autoswitch.threshold7d', next === null ? null : String(next))
         }),
         row('fable', 'f', 'Fable gate', view.modelThresholds ?? 'inherit', () =>
-          setSetting($, 'autoswitch.modelThresholds', nextOf(FABLE_GATES, view.modelThresholds)),
+          setSetting($, 'autoswitch.modelThresholds', nextFableThresholds(view.modelThresholds)),
         ),
         row('strategy', 'g', 'Auto-switch strategy', view.strategy, () =>
           setSetting($, 'autoswitch.strategy', nextOf(STRATEGIES, view.strategy)),

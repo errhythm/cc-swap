@@ -820,7 +820,7 @@ Defaults live in settings.json in the backup root; flags override them.
         type=float,
         metavar="PCT",
         help=(
-            "5h gate (50-99.9). Unset uses --threshold. Any gate tripping "
+            "5h gate (1.0-99.9). Unset uses --threshold. Any gate tripping "
             "switches, even if the others are fine"
         ),
     )
@@ -828,7 +828,7 @@ Defaults live in settings.json in the backup root; flags override them.
         "--threshold-7d",
         type=float,
         metavar="PCT",
-        help="Weekly (7d) gate (50-99.9). Unset uses --threshold",
+        help="Weekly (7d) gate (1.0-99.9). Unset uses --threshold",
     )
     parser.add_argument(
         "--model-thresholds",

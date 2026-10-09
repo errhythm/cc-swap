@@ -1201,6 +1201,9 @@ class TestAutoCommand:
         out = capsys.readouterr().out
         assert "--once" in out
         assert "Exit codes" in out
+        # Shared --threshold stays 50-99.9; the per-window gates accept 1.0-99.9.
+        assert "5h gate (1.0-99.9)" in out
+        assert "Weekly (7d) gate (1.0-99.9)" in out
 
     def test_main_help_mentions_auto(self):
         result = subprocess.run(
