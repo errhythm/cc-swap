@@ -24,6 +24,7 @@ from claude_swap.snapshot_source import account_identity
 from claude_swap.settings import (
     load_settings,
     load_ui_settings,
+    parse_model_thresholds,
     set_setting,
     unset_setting,
     with_model_threshold,
@@ -612,6 +613,18 @@ class CswapApp(App):
         except Exception as exc:  # persistence is best-effort; never crash the UI
             self.notify(f"Could not save dashboard view: {exc}", severity="warning")
 
+    def bar_threshold(self, label: str) -> float | None:
+        """Tick for one usage row: an explicit gate, else the shared threshold."""
+        key = label.lower()
+        if key == "5h" and self._threshold_5h is not None:
+            return self._threshold_5h
+        if key == "7d" and self._threshold_7d is not None:
+            return self._threshold_7d
+        for name, pct in parse_model_thresholds(self._model_thresholds):
+            if name.lower() == key:
+                return pct
+        return self.threshold_pct
+
     def apply_threshold(self, value: float) -> None:
         """Update bar ticks immediately and persist the shared auto setting."""
         self.threshold_pct = value
@@ -636,6 +649,7 @@ class CswapApp(App):
             dotted = "autoswitch.threshold7d"
             label = "weekly gate"
         self._write_optional_setting(dotted, None if value is None else str(value), label)
+        self._refresh_accounts_panels()
 
     def apply_fable_gate(self, value: float | None) -> None:
         """Persist Fable's gate, keeping any other model thresholds."""
@@ -645,6 +659,7 @@ class CswapApp(App):
         self._write_optional_setting(
             "autoswitch.modelThresholds", self._model_thresholds, "Fable gate"
         )
+        self._refresh_accounts_panels()
 
     def _write_optional_setting(self, dotted: str, value: str | None, label: str) -> None:
         try:

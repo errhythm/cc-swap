@@ -9,7 +9,7 @@ auto-switch trigger line), and stale-measurement dimming.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from rich.text import Text
 from textual.widgets import ListItem, ListView, Static
@@ -249,6 +249,7 @@ def account_card_text(
     width: int,
     *,
     threshold: float | None = None,
+    threshold_for: Callable[[str], float | None] | None = None,
     tag: str | None = None,
     now: float | None = None,
     palette: Palette = Palette.DARK,
@@ -319,6 +320,9 @@ def account_card_text(
             if suffix_full != suffix and row_overhead + len(suffix_full) <= width:
                 suffix = suffix_full
             text.append("\n    ")
+            row_threshold = (
+                threshold_for(label) if threshold_for is not None else threshold
+            )
             text.append(
                 usage_bar(
                     f"{label:<{label_width}}",
@@ -326,7 +330,7 @@ def account_card_text(
                     suffix or None,
                     bar_width,
                     stale=stale,
-                    threshold=threshold,
+                    threshold=row_threshold,
                     palette=palette,
                 )
             )
@@ -512,7 +516,7 @@ class AccountsPanel(Static):
                         account_card_text(
                             acc,
                             width,
-                            threshold=app.threshold_pct,
+                            threshold_for=app.bar_threshold,
                             now=now,
                             palette=palette,
                             mask=app.mask_accounts,

@@ -2320,6 +2320,60 @@ class TestAutoScreen:
             await pilot.pause()
             assert screen._settings.threshold == 50.0  # spec's lower bound
 
+    async def test_adjust_popup_steps_each_gate(self, tmp_path, fake_engine):
+        import json as _json
+
+        (tmp_path / "settings.json").write_text(_json.dumps({
+            "schemaVersion": 1,
+            "autoswitch": {"modelThresholds": "Opus=60"},
+        }))
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            screen = app.screen
+            await pilot.press("t")
+            await pilot.pause()
+            from textual.widgets import Static
+
+            from claude_swap.tui.autoview import ThresholdAdjustModal
+
+            assert isinstance(app.screen, ThresholdAdjustModal)
+            body = app.screen.query_one("#adjust-body", Static).render().plain
+            assert "▸ threshold" in body
+            assert "inherit (90%)" in body
+            # ↓ selects 5h; → leaves inherit and saves 91. Opus stays put.
+            await pilot.press("down", "right")
+            await pilot.pause()
+            assert screen._settings.threshold_5h == 91.0
+            assert screen._settings.threshold == 90.0
+            saved = _json.loads((tmp_path / "settings.json").read_text())
+            assert saved["autoswitch"]["threshold5h"] == 91.0
+            assert saved["autoswitch"]["modelThresholds"] == "Opus=60"
+            await pilot.press("down", "left")  # 7d → 89
+            await pilot.pause()
+            assert screen._settings.threshold_7d == 89.0
+            await pilot.press("down", "right")  # Fable → 91, Opus kept
+            await pilot.pause()
+            assert screen._settings.model_thresholds == "Opus=60,Fable=91"
+            await pilot.press("backspace")  # Fable back to inherit
+            await pilot.pause()
+            assert screen._settings.model_thresholds == "Opus=60"
+            body = app.screen.query_one("#adjust-body", Static).render().plain
+            assert "▸ Fable" in body
+            assert "inherit (90%)" in body
+            await pilot.press("enter")
+            await pilot.pause()
+            from claude_swap.tui.autoview import AutoScreen
+
+            assert isinstance(app.screen, AutoScreen)
+            assert fake_engine.instances[0].wakes == 1
+            # the shared line was never written; only the gates were
+            saved = _json.loads((tmp_path / "settings.json").read_text())
+            assert "threshold" not in saved["autoswitch"]
+
     async def test_candidates_ranked_by_headroom(self, tmp_path, fake_engine):
         fake = FakeSwitcher(
             [
