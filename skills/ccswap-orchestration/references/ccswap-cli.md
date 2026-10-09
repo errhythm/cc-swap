@@ -90,6 +90,8 @@ Any `--json` command can return, on exit 1:
 
 `100 - max(pct)` across the windows that apply to the provider (`fiveHour` and `sevenDay` for Claude, `weekly` for Codex), plus any per-model `scoped` window named via `--model`. `<= 0` means at or over limit. `None`/missing means unknown, and unknown accounts are never auto-skipped, they must be surfaced.
 
+Claude `auto` can give 5h, 7d, and named models their own thresholds (`autoswitch.threshold5h`, `autoswitch.threshold7d`, `autoswitch.modelThresholds`). Any one gate at or over its threshold switches. An unset gate inherits `autoswitch.threshold`, which is the single-threshold behavior above.
+
 ## Strategies
 
 - `switch --strategy best`: jumps to the switchable account with the highest headroom.
@@ -103,6 +105,9 @@ Any `--json` command can return, on exit 1:
 | Key | Default | Valid range |
 |---|---|---|
 | `autoswitch.threshold` | 90.0 | 50.0-99.9 |
+| `autoswitch.threshold5h` | None (inherit `threshold`) | 1.0-99.9 |
+| `autoswitch.threshold7d` | None (inherit `threshold`) | 1.0-99.9 |
+| `autoswitch.modelThresholds` | None | `Fable=40` or `Fable=40,Opus=60` |
 | `autoswitch.intervalSeconds` | 60.0 | 15-3600 |
 | `autoswitch.cooldownSeconds` | 300.0 | 0-86400 |
 | `autoswitch.strategy` | "best" | |

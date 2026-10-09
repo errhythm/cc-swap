@@ -4,7 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type {
   CcswapAccount,
   CcswapCodexView,
+  CcswapGates,
   CcswapHistoryView,
+  CcswapScoped,
   CcswapSettingsView,
   CcswapSnapshot,
   CcswapSwitchEntry,
@@ -54,8 +56,20 @@ const TABS: { id: CcswapTab; label: string; hotkey: string }[] = [
 
 // What each Settings press moves to next.
 const THRESHOLDS = [70, 80, 85, 90, 95]
+const GATE_PCTS: (number | null)[] = [null, 70, 80, 85, 90, 95]
 const STRATEGIES = ['best', 'consume-first']
 const WINDOWS = ['both', '5h', '7d']
+
+function defaultGates(threshold = 90): CcswapGates {
+  return {
+    threshold,
+    threshold5h: null,
+    threshold7d: null,
+    windows: 'both',
+    models: [],
+    modelThresholds: {},
+  }
+}
 
 type Raw = { ok: true; stdout: string; stderr: string; exitCode: number } | { ok: false; error: string }
 type Ran = { ok: true; data: any } | { ok: false; error: string }
@@ -90,7 +104,16 @@ function toWindow(w: any): CcswapWindow | null {
   return typeof w?.pct === 'number' ? { pct: Math.round(w.pct), countdown: w.countdown ?? null } : null
 }
 
-function toSnapshot(data: any, threshold: number): CcswapSnapshot {
+function toScoped(list: any): CcswapScoped[] {
+  if (!Array.isArray(list)) return []
+  return list.flatMap((s: any) =>
+    typeof s?.name === 'string' && typeof s?.pct === 'number'
+      ? [{ name: s.name, pct: Math.round(s.pct) }]
+      : [],
+  )
+}
+
+function toSnapshot(data: any, gates: CcswapGates): CcswapSnapshot {
   const accounts: CcswapAccount[] = (Array.isArray(data?.accounts) ? data.accounts : []).map((a: any) => ({
     number: Number(a.number),
     email: String(a.email ?? ''),
@@ -98,27 +121,126 @@ function toSnapshot(data: any, threshold: number): CcswapSnapshot {
     status: String(a.usageStatus ?? 'ok'),
     fiveHour: toWindow(a.usage?.fiveHour),
     sevenDay: toWindow(a.usage?.sevenDay),
+    scoped: toScoped(a.usage?.scoped),
   }))
   const active = typeof data?.activeAccountNumber === 'number' ? data.activeAccountNumber : null
-  return { active, threshold, accounts, error: null }
+  return { active, threshold: gates.threshold, gates, accounts, error: null }
 }
 
-/** The higher of the 5h and 7d windows: the one that binds. */
-export function binding(a: CcswapAccount): { label: '5h' | '7d'; pct: number } | null {
-  const five = a.fiveHour?.pct
-  const seven = a.sevenDay?.pct
-  if (five === undefined && seven === undefined) return null
-  return (five ?? -1) >= (seven ?? -1) ? { label: '5h', pct: five ?? 0 } : { label: '7d', pct: seven ?? 0 }
+function parseModels(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const part of value.split(',')) {
+    const name = part.trim()
+    const key = name.toLowerCase()
+    if (name && !seen.has(key)) {
+      seen.add(key)
+      out.push(key)
+    }
+  }
+  return out
+}
+
+function parseModelThresholds(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (typeof value !== 'string') return out
+  for (const part of value.split(',')) {
+    const eq = part.indexOf('=')
+    if (eq < 0) continue
+    const name = part.slice(0, eq).trim().toLowerCase()
+    const pct = Number(part.slice(eq + 1).trim())
+    if (name && Number.isFinite(pct) && !(name in out)) out[name] = pct
+  }
+  return out
+}
+
+/** null when this label is not a gate (windows filter, or an unwatched model). */
+function gateThreshold(label: string, cfg: CcswapGates): number | null {
+  const key = label.toLowerCase()
+  if (key === '5h') return cfg.windows === '7d' ? null : (cfg.threshold5h ?? cfg.threshold)
+  if (key === '7d') return cfg.windows === '5h' ? null : (cfg.threshold7d ?? cfg.threshold)
+  if (key in cfg.modelThresholds) return cfg.modelThresholds[key] ?? null
+  if (cfg.models.includes('all') || cfg.models.includes(key)) return cfg.threshold
+  return null
+}
+
+/** The gate closest to its own wall: the one that binds. */
+export function binding(a: CcswapAccount, cfg: CcswapGates = defaultGates()): { label: string; pct: number; threshold: number } | null {
+  const hits: { label: string; pct: number; threshold: number }[] = []
+  const push = (label: string, pct: number | undefined) => {
+    if (pct === undefined) return
+    const threshold = gateThreshold(label, cfg)
+    if (threshold === null) return
+    hits.push({ label, pct, threshold })
+  }
+  push('5h', a.fiveHour?.pct)
+  push('7d', a.sevenDay?.pct)
+  for (const scoped of a.scoped ?? []) push(scoped.name, scoped.pct)
+  if (hits.length === 0) return null
+  let worst = hits[0]!
+  let margin = worst.threshold - worst.pct
+  for (const hit of hits.slice(1)) {
+    const next = hit.threshold - hit.pct
+    if (next < margin || (next === margin && hit.pct > worst.pct)) {
+      worst = hit
+      margin = next
+    }
+  }
+  return worst
 }
 
 function bestOther(snap: CcswapSnapshot): CcswapAccount | null {
+  const cfg = snap.gates ?? defaultGates(snap.threshold)
   let best: CcswapAccount | null = null
+  let bestMargin = -Infinity
   for (const a of snap.accounts) {
-    const b = binding(a)
+    const b = binding(a, cfg)
     if (a.active || a.status !== 'ok' || b === null) continue
-    if (best === null || b.pct < (binding(best)?.pct ?? 101)) best = a
+    const margin = b.threshold - b.pct
+    if (best === null || margin > bestMargin) {
+      best = a
+      bestMargin = margin
+    }
   }
   return best
+}
+
+async function readConfig($: $, key: string): Promise<{ value: unknown } | null> {
+  const cfg = await ccswap($, ['config', 'get', key, '--json'])
+  if (!cfg.ok || cfg.data?.key !== key) return null
+  return { value: cfg.data.value }
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function finiteOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+async function loadGates($: $): Promise<CcswapGates> {
+  const [threshold, t5, t7, windows, model, modelThresholds] = await Promise.all([
+    readConfig($, 'autoswitch.threshold'),
+    readConfig($, 'autoswitch.threshold5h'),
+    readConfig($, 'autoswitch.threshold7d'),
+    readConfig($, 'autoswitch.windows'),
+    readConfig($, 'autoswitch.model'),
+    readConfig($, 'autoswitch.modelThresholds'),
+  ])
+  const win = windows?.value
+  return {
+    threshold: finiteOr(threshold?.value, 90),
+    threshold5h: finiteOrNull(t5?.value),
+    threshold7d: finiteOrNull(t7?.value),
+    windows: win === '5h' || win === '7d' || win === 'both' ? win : 'both',
+    models: parseModels(model?.value),
+    modelThresholds: parseModelThresholds(modelThresholds?.value),
+  }
 }
 
 // Polls overlap (timer, Refresh, post-switch, /ccswap). Each takes a number when it
@@ -128,11 +250,11 @@ let applied = 0
 
 async function poll($: $): Promise<CcswapSnapshot> {
   const gen = ++issued
-  const [list, cfg] = await Promise.all([
+  const [list, gates] = await Promise.all([
     ccswap($, ['list', '--provider', 'claude', '--json']),
-    ccswap($, ['config', 'get', 'autoswitch.threshold', '--json']),
+    loadGates($),
   ])
-  const threshold = cfg.ok && Number.isFinite(Number(cfg.data?.value)) ? Number(cfg.data.value) : 90
+  const threshold = gates.threshold
   let prev: CcswapSnapshot | null = null
   let snap: CcswapSnapshot | null = null
   // update() re-runs this on a version miss, so the staleness check and the
@@ -145,13 +267,13 @@ async function poll($: $): Promise<CcswapSnapshot> {
     }
     applied = gen
     snap = list.ok
-      ? toSnapshot(list.data, threshold)
-      : { active: p?.active ?? null, threshold, accounts: [], error: list.error }
+      ? toSnapshot(list.data, gates)
+      : { active: p?.active ?? null, threshold, gates, accounts: [], error: list.error }
     return snap
   })
   const was = prev as CcswapSnapshot | null
   const now = snap as CcswapSnapshot | null
-  if (now === null) return was ?? { active: null, threshold, accounts: [], error: null }
+  if (now === null) return was ?? { active: null, threshold, gates, accounts: [], error: null }
 
   if (was && was.active !== null && now.active !== null && was.active !== now.active) {
     const acct = now.accounts.find(a => a.number === now.active)
@@ -217,8 +339,12 @@ async function loadSettings($: $): Promise<void> {
   const ran = await ccswap($, ['config', 'list', '--json'])
   const rows: any[] = ran.ok && Array.isArray(ran.data?.settings) ? ran.data.settings : []
   const value = (key: string) => rows.find(r => r?.key === key)?.value
+  const rawThresholds = value('autoswitch.modelThresholds')
   const view: CcswapSettingsView = {
     threshold: Number(value('autoswitch.threshold') ?? 90),
+    threshold5h: finiteOrNull(value('autoswitch.threshold5h')),
+    threshold7d: finiteOrNull(value('autoswitch.threshold7d')),
+    modelThresholds: typeof rawThresholds === 'string' && rawThresholds.trim() ? rawThresholds : null,
     strategy: String(value('autoswitch.strategy') ?? 'best'),
     windows: String(value('autoswitch.windows') ?? 'both'),
     statusline: value('claude.statusline') === true,
@@ -240,13 +366,31 @@ function nextOf<T>(list: readonly T[], current: T): T {
   return list[(i + 1) % list.length]!
 }
 
-/** `ccswap config set key value`, then re-reads the Settings tab. */
-async function setSetting($: $, key: string, value: string): Promise<void> {
-  const out = await runRaw($, ['config', 'set', key, value])
+/** Next `modelThresholds` after one press of the Fable row.
+ *
+ * Only Fable moves along `GATE_PCTS` (inherit, then 70–95). Other models stay,
+ * in their original order. A Fable percentage that is not one of those stops
+ * steps onto the ladder. Null when nothing remains, which unsets the key.
+ */
+export function nextFableThresholds(current: string | null): string | null {
+  const parts = (current ?? '').split(',').map(part => part.trim()).filter(Boolean)
+  const others = parts.filter(part => part.split('=')[0]!.trim().toLowerCase() !== 'fable')
+  const currentPct = parseModelThresholds(current).fable
+  const onLadder = currentPct !== undefined && GATE_PCTS.includes(currentPct)
+  const next = nextOf(GATE_PCTS, onLadder ? currentPct : null)
+  const merged = next === null ? others : [...others, `Fable=${next}`]
+  return merged.length ? merged.join(',') : null
+}
+
+/** `ccswap config set` or `unset` (null), then re-reads the Settings tab. */
+async function setSetting($: $, key: string, value: string | null): Promise<void> {
+  const out = value === null
+    ? await runRaw($, ['config', 'unset', key])
+    : await runRaw($, ['config', 'set', key, value])
   if (!out.ok) $.ui.toast(`ccswap: ${out.error}`)
   else if (out.exitCode !== 0) $.ui.toast(`ccswap: ${(out.stderr.trim() || out.stdout.trim()).split('\n')[0]}`)
   await loadSettings($)
-  if (key === 'autoswitch.threshold') await poll($).catch(() => undefined)
+  if (key.startsWith('autoswitch.')) await poll($).catch(() => undefined)
 }
 
 async function readTone($: $): Promise<CcswapTone> {
@@ -471,6 +615,17 @@ export const register: Register = on => {
         row('threshold', 't', 'Auto-switch threshold', `${view.threshold}%`, () =>
           setSetting($, 'autoswitch.threshold', String(nextOf(THRESHOLDS, view.threshold) ?? 90)),
         ),
+        row('threshold5h', '5', '5h gate', view.threshold5h === null ? 'inherit' : `${view.threshold5h}%`, () => {
+          const next = nextOf(GATE_PCTS, view.threshold5h)
+          return setSetting($, 'autoswitch.threshold5h', next === null ? null : String(next))
+        }),
+        row('threshold7d', '7', 'Weekly gate', view.threshold7d === null ? 'inherit' : `${view.threshold7d}%`, () => {
+          const next = nextOf(GATE_PCTS, view.threshold7d)
+          return setSetting($, 'autoswitch.threshold7d', next === null ? null : String(next))
+        }),
+        row('fable', 'f', 'Fable gate', view.modelThresholds ?? 'inherit', () =>
+          setSetting($, 'autoswitch.modelThresholds', nextFableThresholds(view.modelThresholds)),
+        ),
         row('strategy', 'g', 'Auto-switch strategy', view.strategy, () =>
           setSetting($, 'autoswitch.strategy', nextOf(STRATEGIES, view.strategy)),
         ),
@@ -531,20 +686,20 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return next(e)
     const snap = await read($, snapshot)
     const active = snap?.accounts.find(a => a.active)
-    const bound = active ? binding(active) : null
-    if (!snap || snap.error || !active || bound === null || bound.pct < snap.threshold) return next(e)
+    const bound = active ? binding(active, snap.gates ?? defaultGates(snap.threshold)) : null
+    if (!snap || snap.error || !active || bound === null || bound.pct < bound.threshold) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const c = PALETTES[await read($, tone)]
     const busy = await read($, switching)
     const best = bestOther(snap)
-    const bestPct = best ? binding(best)?.pct : undefined
+    const bestPct = best ? binding(best, snap.gates ?? defaultGates(snap.threshold))?.pct : undefined
     return (
       <Box flexDirection="row">
         <Text>
           <Text color={c.accent} bold>ccswap</Text>
           <Text color={c.muted}> · </Text>
-          <Text color={c[severity(bound.pct, snap.threshold)]}>
+          <Text color={c[severity(bound.pct, bound.threshold)]}>
             {bound.label} {bound.pct}%
           </Text>
           <Text color={c.fg}> on #{active.number}</Text>

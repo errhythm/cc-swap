@@ -152,8 +152,17 @@ ccswap auto --strategy consume-first   # burn the soonest-resetting account firs
 - It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
 - An account whose refresh token has died is quarantined and reported until you either log in with it and re-run `ccswap add --slot N`, or replace its stored credentials from a known-good export — a plain `ccswap import backup.cswap` replaces dead-token slots on its own (`--force` is still required to replace other existing accounts; note a stale export can carry an already-superseded token). API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
 - To hold an account out of rotation yourself — a work account you don't want touched, one you're resting — run `ccswap disable <num|email>`; `ccswap enable <num|email>` puts it back. Disabled accounts are skipped by auto-switch, bare `ccswap switch`, and the `best` / `next-available` strategies, but stay fully managed and remain a valid explicit `ccswap switch <num|email>` target. They show a `(disabled)` marker in `ccswap list`, in the [TUI](#interactive-dashboard-tui), and in the [menu bar](#menu-bar-macos) — both of which also let you toggle the state in place (TUI: menu → *Disable / enable account…*; menu bar: *Disable / enable account*).
-- By default only the account-wide 5h/7d windows drive switching. If you work on one model and hit its **weekly per-model limit** first (e.g. Fable), add `--model Fable` (or `ccswap config set autoswitch.model Fable`) to fold that model's window into the decision, so it switches off an account whose model quota is spent even while its 5h/7d windows still have room.
-  - **Model names** are Anthropic's own per-model `display_name`s, matched case-insensitively. The exact strings for your accounts are the per-model rows in `ccswap list` (e.g. a line reading `Fable: 100%`).
+- By default only the account-wide 5h/7d windows drive switching, and they share one threshold. If you work on one model and hit its **weekly per-model limit** first (e.g. Fable), add `--model Fable` (or `ccswap config set autoswitch.model Fable`) to fold that model's window into the decision, so it switches off an account whose model quota is spent even while its 5h/7d windows still have room.
+- **Separate gates** (`5h`, weekly `7d`, and any named model such as Fable): any one of them reaching its own threshold switches, even if the others are fine. Unset gates inherit `autoswitch.threshold`.
+
+```bash
+ccswap config set autoswitch.threshold5h 85    # session window
+ccswap config set autoswitch.threshold7d 70    # weekly window
+ccswap config set autoswitch.modelThresholds Fable=40   # Fable=40,Opus=60 for several
+ccswap config unset autoswitch.threshold5h     # back to inheriting autoswitch.threshold
+```
+
+The TUI settings menu cycles the same three gates (inherit, then 40–95%). On the auto-switch view, `t` opens a popup for the same numbers: ↑↓ moves between the shared threshold (this session only) and the 5h, weekly, and Fable gates (saved immediately); ←→ changes the selected value by 1%, and ⌫ returns a gate to inherit. `ccswap auto --threshold-5h 85 --threshold-7d 70 --model-thresholds Fable=40` overrides them for one run. Naming a model in `modelThresholds` makes it a gate even without `autoswitch.model`. `autoswitch.windows` still chooses whether 5h, 7d, or both are gates at all. Model names are Anthropic's own per-model `display_name`s, matched case-insensitively; the exact strings are the per-model rows in `ccswap list` (e.g. `Fable: 100%`).
 - **Which window binds** (`ccswap config set autoswitch.windows <both|5h|7d>`, default `both`): narrows the decision to just one of the two account-wide windows. Set it to `5h` to switch only on the rolling session window and never on the weekly one — for someone happy to run their weekly quota all the way down. Set it to `7d` for the opposite: ignore the session window, switch only when the weekly one is the problem. `ccswap list` and `cswap watch` keep showing both numbers regardless — this only changes what `auto` decides on.
 
 For cron/systemd timers, `--once` reports the outcome in its exit code (`0` switched, `1` error, `2` nothing to do, `3` blocked — no viable target), and `--json` emits one JSON event per line:
@@ -214,7 +223,7 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `ccswa
 
 ### Interactive dashboard (TUI)
 
-Run `ccswap` on its own (or `ccswap tui`) for the full-screen dashboard: Claude Code and Codex appear together in labelled sections, with live usage, provider-correct switching, and auto-switching, all keyboard-driven. Arrow-key and Vim-style menu navigation wraps at both ends. The menu's **Settings…** screen cycles the theme, dashboard view, auto-switch threshold, and strategy; its dashboard view can show both providers or only Claude Code / Codex without stopping background updates for the hidden provider. `ccswap watch` opens straight into the live monitor using the selected dashboard view. Works on macOS, Linux, and Windows.
+Run `ccswap` on its own (or `ccswap tui`) for the full-screen dashboard: Claude Code and Codex appear together in labelled sections, with live usage, provider-correct switching, and auto-switching, all keyboard-driven. Arrow-key and Vim-style menu navigation wraps at both ends. The menu's **Settings…** screen cycles the theme, dashboard view, auto-switch threshold, and strategy, and toggles **Mask account info**. Masking hides email addresses and organization names on the dashboard, the `w` watch page, and the auto-switch view — including its candidate list and event log — while slot numbers and aliases stay visible so you can still switch. `m` toggles it from any screen, and the footer shows `Mask on` or `Mask off`. The same switch is `ccswap config set ui.mask on` (off by default). The dashboard view can show both providers or only Claude Code / Codex without stopping background updates for the hidden provider. `ccswap watch` opens straight into the live monitor using the selected dashboard view. Works on macOS, Linux, and Windows.
 
 ### Codex CLI accounts
 
@@ -390,7 +399,11 @@ ccswap config                              # list effective settings ("(default)
 ccswap config get autoswitch.threshold
 ccswap config set autoswitch.threshold 80  # validated: rejects out-of-range values loudly
 ccswap config set ui.view codex             # combined (default), claude, or codex
+ccswap config set ui.mask on                # hide emails and org names in the TUI
 ccswap config set autoswitch.model Fable   # per-model switching (see "auto"); Fable,Opus for several
+ccswap config set autoswitch.threshold5h 85 # 5h gate; unset inherits autoswitch.threshold
+ccswap config set autoswitch.threshold7d 70 # weekly gate, independent of the 5h one
+ccswap config set autoswitch.modelThresholds Fable=40  # Fable gate; Fable=40,Opus=60 for several
 ccswap config set autoswitch.windows 5h    # switch on the session window only; 7d for weekly-only, both to reset
 ccswap config unset autoswitch.threshold   # back to the default
 ccswap config path                         # where settings.json lives

@@ -27,7 +27,14 @@ from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
-from claude_swap.tui.data import PROVIDERS, PROVIDER_LABELS, iter_accounts
+from claude_swap.settings import parse_model_thresholds
+from claude_swap.tui.data import (
+    PROVIDERS,
+    PROVIDER_LABELS,
+    account_label,
+    iter_accounts,
+    present_tag,
+)
 from claude_swap.tui.widgets import (
     AccountItem,
     AccountsPanel,
@@ -45,6 +52,35 @@ DEFAULT_THRESHOLD_PCT = 90.0
 MenuEntries = list[tuple[str, str]]  # (label, action_id)
 
 _BACK = ("← back", "back")
+
+# None is "inherit autoswitch.threshold". Exact values outside this ladder
+# are still `ccswap config set`; selecting the row steps to the next stop,
+# and the last stop wraps back to inherit.
+_GATE_STOPS = (40.0, 50.0, 60.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0)
+
+
+def _gate_label(pct: float | None, inherited: float) -> str:
+    if pct is None:
+        return f"inherit ({inherited:g}%)"
+    return f"{pct:g}%"
+
+
+def _fable_pct(model_thresholds: str | None) -> float | None:
+    for name, pct in parse_model_thresholds(model_thresholds):
+        if name.lower() == "fable":
+            return pct
+    return None
+
+
+def _next_gate(current: float | None) -> float | None:
+    if current is None:
+        return _GATE_STOPS[0]
+    index = bisect_left(_GATE_STOPS, current)
+    if index < len(_GATE_STOPS) and _GATE_STOPS[index] == current:
+        index += 1
+    if index >= len(_GATE_STOPS):
+        return None
+    return _GATE_STOPS[index]
 
 
 class DashboardScreen(Screen):
@@ -127,8 +163,8 @@ class DashboardScreen(Screen):
         entries: MenuEntries = [
             (
                 f"{PROVIDER_LABELS[provider]} — {acc.number}  "
-                f"{f'{acc.alias} ({acc.email})' if acc.alias else acc.email}"
-                f"  [{acc.display_tag}]",
+                f"{self._account_label(acc)}"
+                f"  [{self._account_tag(acc)}]",
                 f"remove:{provider}:{acc.number}",
             )
             for provider, acc in iter_accounts(self.app.snapshots)
@@ -143,7 +179,7 @@ class DashboardScreen(Screen):
         # not an account scope, so administrative menus must not hide accounts.
         entries: MenuEntries = []
         for provider, acc in iter_accounts(self.app.snapshots):
-            name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+            name = self._account_label(acc)
             action = "→ enable" if acc.disabled else "→ disable"
             state = "  (disabled)" if acc.disabled else ""
             entries.append(
@@ -171,7 +207,23 @@ class DashboardScreen(Screen):
         return [
             (f"Theme: {self.app._theme_name}", "setting:theme"),
             (f"Dashboard view: {view_labels[self.app._view]}", "setting:view"),
+            (
+                f"Mask account info: {'on' if self.app.mask_accounts else 'off'}",
+                "setting:mask",
+            ),
             (f"Auto-switch threshold: {threshold_label}%", "setting:threshold"),
+            (
+                f"5h gate: {_gate_label(self.app._threshold_5h, threshold_value)}",
+                "setting:threshold5h",
+            ),
+            (
+                f"Weekly gate: {_gate_label(self.app._threshold_7d, threshold_value)}",
+                "setting:threshold7d",
+            ),
+            (
+                f"Fable gate: {_gate_label(_fable_pct(self.app._model_thresholds), threshold_value)}",
+                "setting:fable",
+            ),
             (f"Auto-switch strategy: {self.app._strategy_name}", "setting:strategy"),
             (f"Claude statusline: {self._claude_label('claude.statusline')}",
              "claude:claude.statusline"),
@@ -324,6 +376,14 @@ class DashboardScreen(Screen):
                 if index < len(ladder) and ladder[index] == current:
                     index += 1
                 app.apply_threshold(ladder[index % len(ladder)])
+            elif key == "threshold5h":
+                app.apply_window_gate("5h", _next_gate(app._threshold_5h))
+            elif key == "threshold7d":
+                app.apply_window_gate("7d", _next_gate(app._threshold_7d))
+            elif key == "fable":
+                app.apply_fable_gate(_next_gate(_fable_pct(app._model_thresholds)))
+            elif key == "mask":
+                app.apply_mask(not app.mask_accounts)
             elif key == "strategy":
                 order = ("best", "consume-first")
                 value = order[(order.index(app._strategy_name) + 1) % len(order)]
@@ -360,6 +420,36 @@ class DashboardScreen(Screen):
 
     def action_cursor_up(self) -> None:
         self.query_one("#menu", ListView).action_cursor_up()
+
+    def _account_label(self, acc: AccountSnapshot) -> str:
+        return account_label(acc.alias, acc.email, mask=self.app.mask_accounts)
+
+    def _account_tag(self, acc: AccountSnapshot) -> str:
+        return present_tag(acc.display_tag, mask=self.app.mask_accounts)
+
+    def refresh_masked_labels(self) -> None:
+        """Rebuild an open menu whose rows contain account identities."""
+        if self.is_mounted and self._menu_stack:
+            self.call_after_refresh(self._refresh_open_menu)
+
+    async def _refresh_open_menu(self) -> None:
+        if not self._menu_stack:
+            return
+        title = self._menu_stack[-1][0]
+        builders = {
+            "remove account": self._remove_entries,
+            "disable / enable": self._disable_entries,
+            "settings": self._settings_entries,
+        }
+        builder = builders.get(title)
+        if builder is None:
+            return
+        menu = self.query_one("#menu", ListView)
+        index = menu.index
+        self._menu_stack[-1] = (title, builder())
+        await self._render_menu()
+        if index is not None and menu.children:
+            menu.index = min(index, len(menu.children) - 1)
 
 
 class AccountListScreen(Screen):
@@ -559,14 +649,18 @@ class WatchScreen(AccountListScreen):
 
     def on_mount(self) -> None:
         self.watch(self.app, "refresh_status", self._on_refresh_status)
+        self.watch(self.app, "mask_accounts", self._on_refresh_status)
         self.query_one("#list-title", Static).update(self._title_text())
         super().on_mount()
 
     def _title_text(self) -> str:
         if self._selecting:
             return self._SELECT_TITLE
+        title = self._WATCH_TITLE
+        if self.app.mask_accounts:
+            title += " · masked"
         status = self.app.refresh_status
-        return f"{self._WATCH_TITLE} · {status}" if status else self._WATCH_TITLE
+        return f"{title} · {status}" if status else title
 
     def _on_refresh_status(self, status: str) -> None:
         if not self._selecting:

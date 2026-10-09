@@ -719,6 +719,22 @@ def _list_dispatch(claude_switcher: "ClaudeAccountSwitcher", args) -> dict | Non
     return None
 
 
+def _gate_banner(settings) -> str:
+    """Suffix for the auto-loop banner when any gate has its own threshold."""
+    from claude_swap.settings import parse_model_thresholds
+
+    parts = []
+    if settings.threshold_5h is not None:
+        parts.append(f"5h {settings.threshold_5h:g}%")
+    if settings.threshold_7d is not None:
+        parts.append(f"7d {settings.threshold_7d:g}%")
+    for name, pct in parse_model_thresholds(settings.model_thresholds):
+        parts.append(f"{name} {pct:g}%")
+    if not parts:
+        return ""
+    return ", gates " + " / ".join(parts)
+
+
 def _auto_command(argv: list[str]) -> None:
     """Handle `cswap auto [--once] [--json] [...]`.
 
@@ -800,6 +816,29 @@ Defaults live in settings.json in the backup root; flags override them.
         ),
     )
     parser.add_argument(
+        "--threshold-5h",
+        type=float,
+        metavar="PCT",
+        help=(
+            "5h gate (1.0-99.9). Unset uses --threshold. Any gate tripping "
+            "switches, even if the others are fine"
+        ),
+    )
+    parser.add_argument(
+        "--threshold-7d",
+        type=float,
+        metavar="PCT",
+        help="Weekly (7d) gate (1.0-99.9). Unset uses --threshold",
+    )
+    parser.add_argument(
+        "--model-thresholds",
+        metavar="NAME=PCT",
+        help=(
+            "Per-model gates, e.g. Fable=40 or Fable=40,Opus=70. A named "
+            "model is watched even without --model; any gate tripping switches"
+        ),
+    )
+    parser.add_argument(
         "--include-api-key-accounts",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -873,6 +912,7 @@ Defaults live in settings.json in the backup root; flags override them.
                 dimmed(
                     f"Auto-switch running: threshold {settings.threshold:.0f}%, "
                     f"every {settings.interval_seconds:.0f}s"
+                    f"{_gate_banner(settings)}"
                     f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
                 )
             )

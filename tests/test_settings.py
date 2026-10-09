@@ -22,7 +22,11 @@ from claude_swap.settings import (
     load_settings,
     load_ui_settings,
     merged_with_cli,
+    effective_model_names,
+    gate_thresholds,
+    parse_model_thresholds,
     parse_window_selection,
+    with_model_threshold,
     save_settings,
     set_setting,
     settings_path,
@@ -166,6 +170,22 @@ class TestUiSettings:
     def test_ui_view_round_trips(self, tmp_path: Path):
         assert set_setting(tmp_path, "ui.view", "codex") == "codex"
         assert load_ui_settings(tmp_path).view == "codex"
+
+    def test_ui_mask_round_trips(self, tmp_path: Path):
+        assert load_ui_settings(tmp_path).mask is False
+        assert set_setting(tmp_path, "ui.mask", "on") is True
+        assert load_ui_settings(tmp_path).mask is True
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert raw["ui"]["mask"] is True
+
+    def test_invalid_mask_does_not_reset_view(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(
+            json.dumps({"ui": {"mask": "yes", "view": "codex", "theme": "light"}})
+        )
+        loaded = load_ui_settings(tmp_path)
+        assert loaded.mask is False
+        assert loaded.view == "codex"
+        assert loaded.theme == "light"
 
     def test_invalid_theme_does_not_reset_view(self, tmp_path: Path):
         settings_path(tmp_path).write_text(
@@ -409,3 +429,69 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestPerGateThresholds:
+    def test_unset_gates_inherit_the_shared_threshold(self, tmp_path: Path):
+        loaded = load_settings(tmp_path)
+        assert loaded.threshold_5h is None
+        assert loaded.threshold_7d is None
+        assert loaded.model_thresholds is None
+        assert gate_thresholds(loaded).overrides == {}
+
+    def test_set_and_unset_each_gate(self, tmp_path: Path):
+        assert set_setting(tmp_path, "autoswitch.threshold5h", "80") == 80.0
+        assert set_setting(tmp_path, "autoswitch.threshold7d", "70") == 70.0
+        assert set_setting(tmp_path, "autoswitch.modelThresholds", "Fable=40, Opus=60") == (
+            "Fable=40,Opus=60"
+        )
+        loaded = load_settings(tmp_path)
+        assert loaded.threshold_5h == 80.0
+        assert loaded.threshold_7d == 70.0
+        assert gate_thresholds(loaded).overrides == {
+            "5h": 80.0,
+            "7d": 70.0,
+            "fable": 40.0,
+            "opus": 60.0,
+        }
+        assert effective_model_names(loaded) == ("Fable", "Opus")
+        assert unset_setting(tmp_path, "autoswitch.threshold5h") is True
+        assert load_settings(tmp_path).threshold_5h is None
+
+    def test_with_model_threshold_keeps_the_others(self):
+        assert with_model_threshold(None, "Fable", 40) == "Fable=40"
+        assert with_model_threshold("Opus=60", "Fable", 40) == "Opus=60,Fable=40"
+        assert with_model_threshold("Fable=40,Opus=60", "Fable", None) == "Opus=60"
+        assert with_model_threshold("Fable=40", "Fable", None) is None
+
+    def test_model_threshold_alone_names_the_gate(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.model", "Opus")
+        set_setting(tmp_path, "autoswitch.modelThresholds", "Fable=55")
+        loaded = load_settings(tmp_path)
+        assert effective_model_names(loaded) == ("Opus", "Fable")
+
+    def test_equal_to_the_shared_threshold_is_not_an_override(self):
+        loaded = AutoSwitchSettings(threshold=90.0, threshold_5h=90.0, model_thresholds="Fable=90")
+        assert gate_thresholds(loaded).overrides == {}
+        assert effective_model_names(loaded) == ("Fable",)
+
+    def test_rejects_a_bad_model_threshold(self, tmp_path: Path):
+        with pytest.raises(ConfigError, match="Name=PCT"):
+            set_setting(tmp_path, "autoswitch.modelThresholds", "Fable")
+        with pytest.raises(ConfigError, match="between 1 and 99.9"):
+            set_setting(tmp_path, "autoswitch.threshold7d", "0")
+        assert not settings_path(tmp_path).exists()
+
+    def test_hand_edited_garbage_disables_the_gate(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(json.dumps({
+            "autoswitch": {
+                "threshold5h": "high",
+                "threshold7d": 200,
+                "modelThresholds": "nope, Fable=40",
+            }
+        }))
+        loaded = load_settings(tmp_path)
+        assert loaded.threshold_5h is None
+        assert loaded.threshold_7d == 99.9
+        assert loaded.model_thresholds == "Fable=40"
+        assert parse_model_thresholds("Fable=40, Fable=10, Opus=oops") == (("Fable", 40.0),)

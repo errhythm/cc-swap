@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { parseHistory } from '../hooks/register.js'
+import { nextFableThresholds, parseHistory } from '../hooks/register.js'
 
 type Acct = { number: number; email: string; five: number; seven: number }
 
@@ -371,4 +371,13 @@ test('history lists only switch lines, newest first', async () => {
     { at: '2026-10-08 12:51', from: 1, to: 2 },
   ])
   expect(parseHistory('')).toEqual([])
+})
+
+test('the Fable gate keeps other model thresholds', async () => {
+  expect(nextFableThresholds('Fable=70,Opus=60')).toBe('Opus=60,Fable=80')
+  expect(nextFableThresholds('Opus=60')).toBe('Opus=60,Fable=70')
+  expect(nextFableThresholds('Fable=40,Opus=60')).toBe('Opus=60,Fable=70')
+  expect(nextFableThresholds('Fable=95')).toBe(null)
+  expect(nextFableThresholds('Fable=95,Opus=60')).toBe('Opus=60')
+  expect(nextFableThresholds(null)).toBe('Fable=70')
 })

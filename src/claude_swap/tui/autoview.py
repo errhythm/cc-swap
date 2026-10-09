@@ -21,8 +21,8 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
-from textual.widgets import Footer, RichLog, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Footer, Label, RichLog, Static
 
 from claude_swap.autoswitch import (
     AutoSwitchEngine,
@@ -34,8 +34,11 @@ from claude_swap.codex_autoswitch import CodexAutoSwitchEngine
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import (
     SETTING_SPECS,
+    effective_model_names,
+    gate_thresholds,
     load_settings,
     parse_model_names,
+    parse_model_thresholds,
     parse_window_selection,
 )
 from claude_swap.tui import data
@@ -55,16 +58,23 @@ _EVENT_ROLES = {
 _QUIET_KINDS = {"poll", "no-switch", "sleep", "account-unquarantined"}
 
 
-def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Text:
-    """Log line for one engine event, styled like the CLI's human renderer."""
+def event_text(
+    event: AutoSwitchEvent, *, palette: Palette = Palette.DARK, mask: bool = False
+) -> Text:
+    """Log line for one engine event, styled like the CLI's human renderer.
+
+    ``mask`` redacts mailboxes in the human line only. The engine's own
+    ``human()`` stays intact for the CLI.
+    """
     role = _EVENT_ROLES.get(event.kind)
     if role is not None:
         style = getattr(palette, role)
     else:
         style = palette.muted if event.kind in _QUIET_KINDS else palette.foreground
+    body = data.mask_emails_in_text(event.human()) if mask else event.human()
     text = Text()
     text.append(f"{data.clock_stamp()}  ", style=palette.muted)
-    text.append(event.human(), style=style)
+    text.append(body, style=style)
     return text
 
 
@@ -85,14 +95,24 @@ class AutoScreen(Screen):
         self.provider = provider
         self._engine: AutoSwitchEngine | CodexAutoSwitchEngine | None = None
         self._settings = None
-        # Session-only threshold adjustment (t, then arrows). Never written
-        # to settings.json — same memory-only precedent as the dry-run
-        # toggle. ``_configured_threshold`` is the mount-time file value the
-        # screen reverts to on exit; ``_entry_threshold`` is the value when
-        # adjust mode was entered (wake/log only on a net change).
+        # ``t`` opens ThresholdAdjustModal. The shared threshold stays
+        # session-only (never written; unmount restores the file value).
+        # 5h, weekly, and Fable are real gates and are saved as they change.
+        # ``_configured_threshold`` is the mount-time file value the screen
+        # reverts to on exit; ``_entry_*`` is the value when adjust mode was
+        # entered (wake/log only on a net change).
         self._adjusting = False
+        self._adjust_index = 0
         self._configured_threshold: float | None = None
         self._entry_threshold: float | None = None
+        self._entry_gates: tuple[float | None, float | None, str | None] = (
+            None,
+            None,
+            None,
+        )
+        # Notes and events, so toggling the mask can redraw the log. The
+        # engine does not keep a transcript of its own.
+        self._log_items: list[tuple[str, str | AutoSwitchEvent]] = []
 
     def compose(self) -> ComposeResult:
         yield AccountsPanel(
@@ -123,6 +143,7 @@ class AutoScreen(Screen):
         self._update_summary()
         self.watch(self.app, "snapshots", self._on_snapshots)
         self.watch(self.app, "theme", self._on_theme_change)
+        self.watch(self.app, "mask_accounts", self._on_mask_change)
         self._start_engine(dry_run=True)
 
     def on_unmount(self) -> None:
@@ -155,41 +176,165 @@ class AutoScreen(Screen):
             return False  # hidden and inert until adjust mode is armed
         return True
 
+    def _adjust_categories(self) -> tuple[tuple[str, str], ...]:
+        """Rows in the adjust popup. Codex has no per-window gates."""
+        if self.provider != "claude":
+            return (("all", "threshold"),)
+        return (
+            ("all", "threshold"),
+            ("5h", "5h"),
+            ("7d", "7d"),
+            ("fable", "Fable"),
+        )
+
+    def _selected_gate(self) -> str:
+        categories = self._adjust_categories()
+        return categories[self._adjust_index % len(categories)][0]
+
     def action_adjust_threshold(self) -> None:
         if self._adjusting:
+            # ``t`` toggles. The popup owns the key while it is up; this is
+            # the path when adjust mode is armed without a modal.
             self._end_adjust()
             return
         self._adjusting = True
+        self._adjust_index = 0
         self._entry_threshold = self._settings.threshold
+        self._entry_gates = (
+            self._settings.threshold_5h,
+            self._settings.threshold_7d,
+            self._settings.model_thresholds,
+        )
         self._update_summary()
         self.refresh_bindings()
+        self.app.push_screen(
+            ThresholdAdjustModal(self), self._on_adjust_dismiss
+        )
+
+    def _on_adjust_dismiss(self, _result: None) -> None:
+        if self._adjusting:
+            self._end_adjust()
 
     def action_adjust_done(self) -> None:
         if self._adjusting:
             self._end_adjust()
 
+    def move_adjust_category(self, delta: int) -> None:
+        count = len(self._adjust_categories())
+        self._adjust_index = (self._adjust_index + delta) % count
+
     def action_threshold_step(self, delta: float) -> None:
         if not self._adjusting:
             return
-        spec = SETTING_SPECS["autoswitch.threshold"]
-        value = min(spec.hi, max(spec.lo, self._settings.threshold + delta))
-        self._set_threshold(value)
+        self._step_selected(float(delta))
+
+    def clear_selected_gate(self) -> None:
+        """Return the selected 5h/7d/Fable gate to the shared threshold."""
+        key = self._selected_gate()
+        if key == "all":
+            return
+        self._set_gate(key, None)
+
+    def _step_selected(self, delta: float) -> None:
+        key = self._selected_gate()
+        if key == "all":
+            spec = SETTING_SPECS["autoswitch.threshold"]
+            value = min(spec.hi, max(spec.lo, self._settings.threshold + delta))
+            self._set_threshold(value)
+            return
+        spec = SETTING_SPECS["autoswitch.threshold5h"]
+        current = self._explicit_gate(key)
+        base = self._settings.threshold if current is None else current
+        value = round(min(spec.hi, max(spec.lo, base + delta)), 1)
+        self._set_gate(key, value)
+
+    def _explicit_gate(self, key: str) -> float | None:
+        if key == "5h":
+            return self._settings.threshold_5h
+        if key == "7d":
+            return self._settings.threshold_7d
+        for name, pct in parse_model_thresholds(self._settings.model_thresholds):
+            if name.lower() == "fable":
+                return pct
+        return None
+
+    def _set_gate(self, key: str, value: float | None) -> None:
+        """Persist one gate and point the running engine at it."""
+        if self._explicit_gate(key) == value:
+            return
+        if key == "5h":
+            self.app.apply_window_gate("5h", value)
+            self._settings = replace(self._settings, threshold_5h=value)
+        elif key == "7d":
+            self.app.apply_window_gate("7d", value)
+            self._settings = replace(self._settings, threshold_7d=value)
+        else:
+            self.app.apply_fable_gate(value)
+            self._settings = replace(
+                self._settings, model_thresholds=self.app._model_thresholds
+            )
+        self._sync_engine_settings()
+        self._update_summary()
+
+    def _sync_engine_settings(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        engine.settings = self._settings
+        pin = getattr(engine, "_pin_poll_inputs", None)
+        if pin is not None:
+            pin()
+
+    def adjust_menu_text(self) -> Text:
+        palette = Palette.from_theme(self.app.current_theme)
+        text = Text()
+        categories = self._adjust_categories()
+        selected = self._adjust_index % len(categories)
+        for index, (key, label) in enumerate(categories):
+            style = palette.accent if index == selected else palette.foreground
+            mark = "▸" if index == selected else " "
+            text.append(f"{mark} {label:<12}{self._format_gate(key)}\n", style=style)
+        return text
+
+    def _format_gate(self, key: str) -> str:
+        if key == "all":
+            label = f"{pct_label(self._settings.threshold)}%"
+            if self._settings.threshold != self._configured_threshold:
+                label += "  session"
+            return label
+        value = self._explicit_gate(key)
+        if value is None:
+            return f"inherit ({pct_label(self._settings.threshold)}%)"
+        return f"{pct_label(value)}%"
 
     def _end_adjust(self) -> None:
         self._adjusting = False
         self._update_summary()
         self.refresh_bindings()
-        if self._settings.threshold == self._entry_threshold:
+        threshold_changed = self._settings.threshold != self._entry_threshold
+        gates_changed = self._entry_gates != (
+            self._settings.threshold_5h,
+            self._settings.threshold_7d,
+            self._settings.model_thresholds,
+        )
+        if not threshold_changed and not gates_changed:
             return  # no net change: nothing to announce, no tick to force
         if self._engine is not None:
             self._engine.wake()  # show a decision at the new value now
-        self.query_one("#event-log", RichLog).write(
-            Text(
+        if threshold_changed and not gates_changed:
+            self._log_note(
                 f"— threshold set to {pct_label(self._settings.threshold)}% "
-                "for this session —",
-                style=Palette.from_theme(self.app.current_theme).muted,
+                "for this session —"
             )
-        )
+            return
+        parts = []
+        if threshold_changed:
+            parts.append(f"threshold {pct_label(self._settings.threshold)}% (session)")
+        for key, label in self._adjust_categories():
+            if key == "all":
+                continue
+            parts.append(f"{label} {self._format_gate(key)}")
+        self._log_note("— " + " · ".join(parts) + " —")
 
     def _set_threshold(self, value: float) -> None:
         if value == self._settings.threshold:
@@ -209,11 +354,24 @@ class AutoScreen(Screen):
             f"threshold {pct_label(self._settings.threshold)}%",
             style=palette.accent if self._adjusting else "",
         )
+        gates = []
+        if self._settings.threshold_5h is not None:
+            gates.append(f"5h {pct_label(self._settings.threshold_5h)}%")
+        if self._settings.threshold_7d is not None:
+            gates.append(f"7d {pct_label(self._settings.threshold_7d)}%")
+        for name, pct in parse_model_thresholds(self._settings.model_thresholds):
+            gates.append(f"{name} {pct_label(pct)}%")
+        if gates:
+            text.append(" · " + " ".join(gates))
         if self._settings.threshold != self._configured_threshold:
             text.append(" (session)", style=palette.muted)
         text.append(f" · poll every {self._settings.interval_seconds:.0f}s")
+        if self.app.mask_accounts:
+            text.append(" · masked", style=palette.muted)
         if self._adjusting:
-            text.append("   ← → adjust · enter done", style=palette.muted)
+            text.append(
+                "   ↑↓ category · ←→ ±1% · enter done", style=palette.muted
+            )
         self.query_one("#auto-summary", Static).update(text)
 
     # -- engine -------------------------------------------------------------
@@ -235,14 +393,8 @@ class AutoScreen(Screen):
             name=f"auto-engine-{'dry' if dry_run else 'live'}",
         )
         self._update_badge()
-        log = self.query_one("#event-log", RichLog)
         mode = "DRY-RUN (watching only)" if dry_run else "LIVE (will switch accounts)"
-        log.write(
-            Text(
-                f"— engine started: {mode} —",
-                style=Palette.from_theme(self.app.current_theme).muted,
-            )
-        )
+        self._log_note(f"— engine started: {mode} —")
 
     def _emit_from_thread(self, event: AutoSwitchEvent) -> None:
         """Engine ``on_event`` callback — runs on the worker thread."""
@@ -255,10 +407,42 @@ class AutoScreen(Screen):
     def _on_engine_event(self, event: AutoSwitchEvent) -> None:
         if not self.is_attached:
             return
-        palette = Palette.from_theme(self.app.current_theme)
-        self.query_one("#event-log", RichLog).write(event_text(event, palette=palette))
+        self._log_items.append(("event", event))
+        self._write_log_item(("event", event))
         if event.kind == "switch":
             self.app.request_refresh(self.provider)
+
+    def _log_note(self, note: str) -> None:
+        item: tuple[str, str | AutoSwitchEvent] = ("note", note)
+        self._log_items.append(item)
+        self._write_log_item(item)
+
+    def _write_log_item(self, item: tuple[str, str | AutoSwitchEvent]) -> None:
+        if not self.is_mounted:
+            return
+        palette = Palette.from_theme(self.app.current_theme)
+        kind, payload = item
+        log = self.query_one("#event-log", RichLog)
+        if kind == "note":
+            log.write(Text(str(payload), style=palette.muted))
+            return
+        assert isinstance(payload, AutoSwitchEvent)
+        log.write(
+            event_text(payload, palette=palette, mask=self.app.mask_accounts)
+        )
+
+    def _repaint_log(self) -> None:
+        if not self.is_mounted:
+            return
+        log = self.query_one("#event-log", RichLog)
+        log.clear()
+        for item in self._log_items:
+            self._write_log_item(item)
+
+    def _on_mask_change(self, _on: bool) -> None:
+        self._update_summary()
+        self._on_snapshot(self.app.snapshots[self.provider])
+        self._repaint_log()
 
     def action_toggle_live(self) -> None:
         if self._engine is None:
@@ -317,7 +501,13 @@ class AutoScreen(Screen):
         # autoswitch.windows included), so the displayed ranking can never
         # disagree with the account it picks.
         palette = Palette.from_theme(self.app.current_theme)
-        models = parse_model_names(self._settings.model) if self._settings else ()
+        claude = self.provider == "claude" and self._settings is not None
+        if claude:
+            models = effective_model_names(self._settings)
+            overrides = gate_thresholds(self._settings).overrides
+        else:
+            models = parse_model_names(self._settings.model) if self._settings else ()
+            overrides = {}
         windows = (
             parse_window_selection(self._settings.windows)
             if self._settings
@@ -328,10 +518,19 @@ class AutoScreen(Screen):
         for acc in snap.accounts:
             if acc.number == active_number or not acc.switchable:
                 continue
-            pct = binding_pct(acc.usage.last_good, models, windows)
+            pct = binding_pct(
+                acc.usage.last_good,
+                models,
+                windows,
+                gate_thresholds=overrides or None,
+                default_threshold=self._settings.threshold if claude and overrides else None,
+            )
             entry = Text()
             entry.append(f"\n  {acc.number:>2}  ", style=palette.foreground)
-            entry.append(acc.email, style=palette.foreground)
+            entry.append(
+                data.present_email(acc.email, mask=self.app.mask_accounts),
+                style=palette.foreground,
+            )
             if acc.usage.sentinel is not None:
                 entry.append(
                     f"  {data.sentinel_label(acc.usage.sentinel)}", style=palette.muted
@@ -353,3 +552,54 @@ class AutoScreen(Screen):
         for _pct, number in sorted(ranked):
             text.append(lines[number])
         return text
+
+
+class ThresholdAdjustModal(ModalScreen[None]):
+    """Popup for the auto-switch view: ↑↓ picks a gate, ←→ nudges it by 1%.
+
+    The shared threshold is session-only. 5h, weekly, and Fable are saved.
+    Backspace returns a gate to inherit. Enter, Esc, or ``t`` closes.
+    """
+
+    BINDINGS = [
+        Binding("left", "step(-1)", show=False),
+        Binding("right", "step(1)", show=False),
+        Binding("up", "category(-1)", show=False),
+        Binding("down", "category(1)", show=False),
+        Binding("backspace,delete", "inherit", show=False),
+        Binding("enter,escape,t", "close", show=False),
+    ]
+
+    def __init__(self, host: AutoScreen) -> None:
+        super().__init__()
+        self._host = host
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box"):
+            yield Label("Adjust thresholds", classes="modal-title")
+            yield Static("", id="adjust-body")
+            yield Static(
+                "↑↓ category    ←→ ±1%    ⌫ inherit    enter done",
+                classes="modal-hint",
+            )
+
+    def on_mount(self) -> None:
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.query_one("#adjust-body", Static).update(self._host.adjust_menu_text())
+
+    def action_step(self, delta: float) -> None:
+        self._host.action_threshold_step(delta)
+        self._redraw()
+
+    def action_category(self, delta: int) -> None:
+        self._host.move_adjust_category(delta)
+        self._redraw()
+
+    def action_inherit(self) -> None:
+        self._host.clear_selected_gate()
+        self._redraw()
+
+    def action_close(self) -> None:
+        self.dismiss(None)

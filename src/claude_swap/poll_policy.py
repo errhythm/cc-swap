@@ -64,7 +64,7 @@ module only.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 
 from claude_swap import oauth
@@ -151,10 +151,31 @@ def binding_pct(
     usage: dict | None,
     models: tuple[str, ...] = (),
     account_windows: tuple[str, ...] = ("5h", "7d"),
+    *,
+    gate_thresholds: Mapping[str, float] | None = None,
+    default_threshold: float | None = None,
 ) -> float | None:
-    """Utilization of the binding (worst) relevant window, or None."""
-    headroom = oauth.account_headroom(usage, models, account_windows)
-    return None if headroom is None else 100.0 - headroom
+    """Utilization of the binding (worst) relevant window, or None.
+
+    With ``gate_thresholds`` (lowercased label → that gate's threshold) the
+    binding window is the one closest to its own wall, and the returned pct
+    is shifted onto the shared-threshold scale: it crosses ``default_threshold``
+    exactly when that gate trips. Without gates this is ``max(pct)``, same as
+    ``100 - account_headroom``.
+    """
+    if not gate_thresholds or default_threshold is None:
+        headroom = oauth.account_headroom(usage, models, account_windows)
+        return None if headroom is None else 100.0 - headroom
+    windows = oauth.relevant_windows(usage, models, account_windows)
+    if not windows:
+        return None
+
+    def margin(window: tuple[str, float, str | None]) -> float:
+        return gate_thresholds.get(window[0].lower(), default_threshold) - window[1]
+
+    label, pct, _resets_at = min(windows, key=lambda w: (margin(w), -w[1]))
+    gate = gate_thresholds.get(label.lower(), default_threshold)
+    return pct + (default_threshold - gate)
 
 
 def limiting_reset_ts(
@@ -212,6 +233,7 @@ def plan_after_fetch(
     recent_429: bool,
     now: float,
     rng: Callable[[], float] = random.random,
+    gate_thresholds: Mapping[str, float] | None = None,
 ) -> tuple[float, float]:
     """``(next_poll_at, interval_s)`` for an account just fetched successfully.
 
@@ -230,8 +252,14 @@ def plan_after_fetch(
     default = MIN_INTERVAL_S if is_active else CANDIDATE_DEFAULT_INTERVAL_S
     ceiling = ACTIVE_MAX_INTERVAL_S if is_active else CANDIDATE_MAX_INTERVAL_S
     base = prev_interval_s or default
-    prev_pct = binding_pct(prev_usage, models)
-    new_pct = binding_pct(new_usage, models)
+    prev_pct = binding_pct(
+        prev_usage, models,
+        gate_thresholds=gate_thresholds, default_threshold=threshold,
+    )
+    new_pct = binding_pct(
+        new_usage, models,
+        gate_thresholds=gate_thresholds, default_threshold=threshold,
+    )
     if prev_pct is None or new_pct is None:
         moving = False
         interval = default

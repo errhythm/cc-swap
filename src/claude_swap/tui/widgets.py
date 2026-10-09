@@ -9,7 +9,7 @@ auto-switch trigger line), and stale-measurement dimming.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from rich.text import Text
 from textual.widgets import ListItem, ListView, Static
@@ -235,26 +235,38 @@ def credit_allowance_text(
     return text
 
 
+def _identity(acc: AccountSnapshot, *, mask: bool) -> tuple[str, str, str]:
+    """Alias, email, and org tag as they should be drawn."""
+    return (
+        data.present_alias(acc.alias, mask=mask),
+        data.present_email(acc.email, mask=mask),
+        data.present_tag(acc.display_tag, mask=mask),
+    )
+
+
 def account_card_text(
     acc: AccountSnapshot,
     width: int,
     *,
     threshold: float | None = None,
+    threshold_for: Callable[[str], float | None] | None = None,
     tag: str | None = None,
     now: float | None = None,
     palette: Palette = Palette.DARK,
+    mask: bool = False,
 ) -> Text:
     """The full account card: header line + per-window bar rows."""
     now = now if now is not None else time.time()
+    alias, email, org = _identity(acc, mask=mask)
 
     text = Text()
     text.append(f"{acc.number:>2}  ", style=f"bold {palette.foreground}")
-    if acc.alias:
-        text.append(acc.alias, style=f"bold {palette.accent}")
-        text.append(f" ({acc.email})", style=palette.foreground)
+    if alias:
+        text.append(alias, style=f"bold {palette.accent}")
+        text.append(f" ({email})", style=palette.foreground)
     else:
-        text.append(acc.email, style=palette.foreground)
-    text.append(f"  [{acc.display_tag}]", style=palette.muted)
+        text.append(email, style=palette.foreground)
+    text.append(f"  [{org}]", style=palette.muted)
     if tag:
         text.append(f"  {tag}", style=palette.muted)
     if acc.is_active:
@@ -308,6 +320,9 @@ def account_card_text(
             if suffix_full != suffix and row_overhead + len(suffix_full) <= width:
                 suffix = suffix_full
             text.append("\n    ")
+            row_threshold = (
+                threshold_for(label) if threshold_for is not None else threshold
+            )
             text.append(
                 usage_bar(
                     f"{label:<{label_width}}",
@@ -315,7 +330,7 @@ def account_card_text(
                     suffix or None,
                     bar_width,
                     stale=stale,
-                    threshold=threshold,
+                    threshold=row_threshold,
                     palette=palette,
                 )
             )
@@ -335,7 +350,11 @@ def account_card_text(
 
 
 def mini_account_text(
-    acc: AccountSnapshot, now: float, *, palette: Palette = Palette.DARK
+    acc: AccountSnapshot,
+    now: float,
+    *,
+    palette: Palette = Palette.DARK,
+    mask: bool = False,
 ) -> Text:
     """One minimized line for an inactive account.
 
@@ -344,14 +363,15 @@ def mini_account_text(
     maxed per-model window shows as ``Fable (!)``. Sentinel states show
     their label instead.
     """
+    alias, email, org = _identity(acc, mask=mask)
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{acc.number:>2}  ", style=f"bold {palette.muted}")
-    if acc.alias:
-        text.append(acc.alias, style=f"bold {palette.accent}")
-        text.append(f" ({acc.email})", style=palette.foreground)
+    if alias:
+        text.append(alias, style=f"bold {palette.accent}")
+        text.append(f" ({email})", style=palette.foreground)
     else:
-        text.append(acc.email, style=palette.foreground)
-    text.append(f"  [{acc.display_tag}]", style=palette.muted)
+        text.append(email, style=palette.foreground)
+    text.append(f"  [{org}]", style=palette.muted)
     if acc.disabled:
         text.append("  (disabled)", style=palette.muted)
     text.append("   ")
@@ -452,6 +472,7 @@ class AccountsPanel(Static):
     def on_mount(self) -> None:
         self.watch(self.app, "snapshots", lambda _snap: self.refresh(layout=True))
         self.watch(self.app, "theme", lambda _t: self.refresh(layout=True))
+        self.watch(self.app, "mask_accounts", lambda _on: self.refresh(layout=True))
 
     def render(self) -> Text:
         app: "CswapApp" = self.app  # type: ignore[assignment]
@@ -495,13 +516,18 @@ class AccountsPanel(Static):
                         account_card_text(
                             acc,
                             width,
-                            threshold=app.threshold_pct,
+                            threshold_for=app.bar_threshold,
                             now=now,
                             palette=palette,
+                            mask=app.mask_accounts,
                         )
                     )
                 elif self._show_minis:
-                    blocks.append(mini_account_text(acc, now, palette=palette))
+                    blocks.append(
+                        mini_account_text(
+                            acc, now, palette=palette, mask=app.mask_accounts
+                        )
+                    )
             if not blocks:
                 text.append("no active managed login", style=palette.muted)
             previous_multiline = False
@@ -534,10 +560,14 @@ class AccountCard(Static):
         self._acc = acc
         self.refresh(layout=True)
 
+    def on_mount(self) -> None:
+        self.watch(self.app, "mask_accounts", lambda _on: self.refresh(layout=True))
+
     def render(self) -> Text:
         return account_card_text(
             self._acc, self.size.width or 80, threshold=self._threshold, tag=self._tag,
             palette=Palette.from_theme(self.app.current_theme),
+            mask=bool(getattr(self.app, "mask_accounts", False)),
         )
 
 

@@ -32,7 +32,7 @@ Full command surface, JSON schema, error envelope, and gotchas (staleness, disab
 | Quick check, active Codex account | `ccswap codex status --json` |
 | Preview autoswitch, no mutation | `ccswap auto --once --dry-run` or `ccswap codex auto --once --dry-run` |
 
-Compute headroom yourself, do not trust one `pct` field alone. Headroom is `100 - max(pct)` across the windows that apply: `fiveHour.pct` and `sevenDay.pct` for Claude, `weekly.pct` for Codex, plus any per-model `scoped` window's `pct` if that model matters.
+Compute headroom yourself, do not trust one `pct` field alone. Headroom is `100 - max(pct)` across the windows that apply: `fiveHour.pct` and `sevenDay.pct` for Claude, `weekly.pct` for Codex, plus any per-model `scoped` window's `pct` if that model matters. Claude auto-switch can trip on any one of 5h, 7d, or a named model (Fable) using its own threshold (`autoswitch.threshold5h`, `autoswitch.threshold7d`, `autoswitch.modelThresholds`); an unset gate inherits `autoswitch.threshold`.
 
 ```bash
 ccswap list --json --provider claude | jq '.accounts[] | {email, fiveHour: .usage.fiveHour.pct, sevenDay: .usage.sevenDay.pct, headroom: (100 - ([.usage.fiveHour.pct, .usage.sevenDay.pct] | max))}'
